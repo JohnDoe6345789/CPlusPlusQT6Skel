@@ -72,6 +72,7 @@ PACKAGE_NAMES = {
 }
 QML_EXCLUDE_DIRS = {".git", ".idea", ".vscode", "__pycache__", "build", "third_party"}
 DEFAULT_QT_CREATOR_OUTPUT_DIR = ROOT / "third_party" / "qtcreator"
+QT_CREATOR_EXECUTABLE_NAMES = ["qtcreator.exe", "qtcreator", "Qt Creator"]
 _VSWHERE_HINT_EMITTED = False
 
 # User settings (persisted in XDG config dir on POSIX or %APPDATA% on Windows).
@@ -1332,6 +1333,17 @@ def _ensure_aqt() -> None:
         run_command([sys.executable, "-m", "pip", "install", "--upgrade", "aqtinstall"])
 
 
+def _find_qt_creator_in_tree(root: Path) -> Optional[Path]:
+    """Return the first Qt Creator executable found inside the provided directory."""
+    if not root or not root.exists():
+        return None
+    for name in QT_CREATOR_EXECUTABLE_NAMES:
+        for candidate in root.rglob(name):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def download_qt_creator(version: Optional[str], output_dir: Path) -> Path:
     """
     Download Qt Creator (includes qml2puppet) via aqtinstall and return the executable path.
@@ -1354,11 +1366,9 @@ def download_qt_creator(version: Optional[str], output_dir: Path) -> Path:
     ]
     run_command(cmd)
 
-    exe_names = ["qtcreator.exe", "qtcreator", "Qt Creator"]
-    for name in exe_names:
-        found = list(output_dir.rglob(name))
-        if found:
-            return found[0]
+    found = _find_qt_creator_in_tree(output_dir)
+    if found:
+        return found
     raise SystemExit(
         f"Downloaded Qt Creator to {output_dir}, but could not locate the executable. "
         "Please check the download contents manually."
@@ -1374,7 +1384,11 @@ def locate_qt_creator(
     """
     Best-effort lookup for Qt Creator binary via PATH, env hints, and defaults.
     """
-    exe_names = ["qtcreator.exe", "qtcreator", "Qt Creator"]
+    if download_output_dir:
+        downloaded = _find_qt_creator_in_tree(download_output_dir)
+        if downloaded:
+            return downloaded
+
     env_candidates = [
         os.environ.get("QT_CREATOR_BIN"),
         os.environ.get("QT_CREATOR_PATH"),
@@ -1384,14 +1398,14 @@ def locate_qt_creator(
             continue
         candidate = Path(value)
         if candidate.is_dir():
-            for name in exe_names:
+            for name in QT_CREATOR_EXECUTABLE_NAMES:
                 exe = candidate / name
                 if exe.exists():
                     return exe
         if candidate.exists():
             return candidate
 
-    for name in exe_names:
+    for name in QT_CREATOR_EXECUTABLE_NAMES:
         found = shutil.which(name)
         if found:
             return Path(found)
@@ -1504,11 +1518,18 @@ def open_qml_in_qt_creator(
             "Qt Quick Designer may not render live previews until it is available."
         )
         if ensure_creator:
-            raise SystemExit(
-                note
-                + f" Try reinstalling Qt Creator or checking {creator_output_dir} for a qml2puppet binary."
+            print(
+                f"{note} Downloading Qt Creator into {creator_output_dir} to fetch the missing qml2puppet tool."
             )
-        print(f"Warning: {note}")
+            creator = download_qt_creator(creator_version, creator_output_dir)
+            puppet = find_qml2puppet(creator)
+            if not puppet:
+                raise SystemExit(
+                    note
+                    + f" Try reinstalling Qt Creator or checking {creator_output_dir} for a qml2puppet binary."
+                )
+        else:
+            print(f"Warning: {note}")
 
     run_command([str(creator), str(qml_path)])
 
