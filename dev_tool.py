@@ -71,6 +71,7 @@ PACKAGE_NAMES = {
     },
 }
 QML_EXCLUDE_DIRS = {".git", ".idea", ".vscode", "__pycache__", "build", "third_party"}
+DEFAULT_QT_CREATOR_OUTPUT_DIR = ROOT / "third_party" / "qtcreator"
 _VSWHERE_HINT_EMITTED = False
 
 
@@ -1172,7 +1173,55 @@ def find_qml_files(root: Path) -> list[Path]:
     return sorted(qml_files, key=lambda p: p.relative_to(root))
 
 
-def locate_qt_creator() -> Optional[Path]:
+def _ensure_aqt() -> None:
+    """Ensure the aqtinstall package is available for downloading Qt Creator."""
+    try:
+        import aqt  # type: ignore  # noqa: F401
+        return
+    except ImportError:
+        print("Installing aqtinstall (needed to download Qt Creator)...")
+        run_command([sys.executable, "-m", "pip", "install", "--upgrade", "aqtinstall"])
+
+
+def download_qt_creator(version: Optional[str], output_dir: Path) -> Path:
+    """
+    Download Qt Creator (includes qml2puppet) via aqtinstall and return the executable path.
+    """
+    _ensure_aqt()
+    host = "windows" if sys.platform.startswith("win") else ("mac" if sys.platform == "darwin" else "linux")
+    version_arg = version or "latest"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "aqt",
+        "install-tool",
+        host,
+        "desktop",
+        "qtcreator",
+        version_arg,
+        "--outputdir",
+        str(output_dir),
+    ]
+    run_command(cmd)
+
+    exe_names = ["qtcreator.exe", "qtcreator", "Qt Creator"]
+    for name in exe_names:
+        found = list(output_dir.rglob(name))
+        if found:
+            return found[0]
+    raise SystemExit(
+        f"Downloaded Qt Creator to {output_dir}, but could not locate the executable. "
+        "Please check the download contents manually."
+    )
+
+
+def locate_qt_creator(
+    *,
+    allow_download: bool = False,
+    download_version: Optional[str] = None,
+    download_output_dir: Path = DEFAULT_QT_CREATOR_OUTPUT_DIR,
+) -> Optional[Path]:
     """
     Best-effort lookup for Qt Creator binary via PATH, env hints, and defaults.
     """
@@ -1230,6 +1279,8 @@ def locate_qt_creator() -> Optional[Path]:
     for candidate in common_paths:
         if candidate.exists():
             return candidate
+    if allow_download:
+        return download_qt_creator(download_version, download_output_dir)
     return None
 
 
@@ -1239,6 +1290,27 @@ def qt_creator_install_help() -> str:
         "Qt Creator not found. Set QT_CREATOR_BIN to the executable or install it "
         f"(Qt online installer: {HELP_URLS['qt_creator']}; package manager e.g. \"{hint}\")."
     )
+
+
+def find_qml2puppet(creator_exe: Path) -> Optional[Path]:
+    """
+    Look for qml2puppet alongside a Qt Creator install; Designer needs this binary.
+    """
+    search_roots = [
+        creator_exe.parent,
+        creator_exe.parent.parent,
+        creator_exe.parent.parent.parent,
+    ]
+    names = ["qml2puppet.exe", "qml2puppet"]
+    for root in search_roots:
+        for name in names:
+            candidate = root / name
+            if candidate.exists():
+                return candidate
+        for candidate in root.glob("qml2puppet*"):
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def choose_qml_file(cli_value: Optional[str]) -> Path:
@@ -1259,12 +1331,36 @@ def choose_qml_file(cli_value: Optional[str]) -> Path:
     return ROOT / chosen
 
 
-def open_qml_in_qt_creator(qml_path: Path) -> None:
-    creator = locate_qt_creator()
+def open_qml_in_qt_creator(
+    qml_path: Path,
+    *,
+    ensure_creator: bool = False,
+    creator_version: Optional[str] = None,
+    creator_output_dir: Path = DEFAULT_QT_CREATOR_OUTPUT_DIR,
+) -> None:
+    creator = locate_qt_creator(
+        allow_download=ensure_creator,
+        download_version=creator_version,
+        download_output_dir=creator_output_dir,
+    )
     if not creator:
         raise SystemExit(qt_creator_install_help())
     if not qml_path.exists():
         raise SystemExit(f"QML file does not exist: {qml_path}")
+
+    puppet = find_qml2puppet(creator)
+    if not puppet:
+        note = (
+            "qml2puppet was not found near your Qt Creator installation. "
+            "Qt Quick Designer may not render live previews until it is available."
+        )
+        if ensure_creator:
+            raise SystemExit(
+                note
+                + f" Try reinstalling Qt Creator or checking {creator_output_dir} for a qml2puppet binary."
+            )
+        print(f"Warning: {note}")
+
     run_command([str(creator), str(qml_path)])
 
 
@@ -1435,6 +1531,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         nargs="?",
         help="Path to QML file (default: choose from discovered project QML files)",
     )
+    qml_parser.add_argument(
+        "--ensure-qt-creator",
+        dest="ensure_qt_creator",
+        action="store_true",
+        default=True,
+        help="If Qt Creator is missing, download it (includes qml2puppet for Designer). Default: on.",
+    )
+    qml_parser.add_argument(
+        "--no-ensure-qt-creator",
+        dest="ensure_qt_creator",
+        action="store_false",
+        help="Skip auto-download of Qt Creator if it is missing.",
+    )
+    qml_parser.add_argument(
+        "--qt-creator-version",
+        help="Qt Creator version to download when --ensure-qt-creator is set (default: latest).",
+    )
+    qml_parser.add_argument(
+        "--qt-creator-output-dir",
+        type=Path,
+        default=DEFAULT_QT_CREATOR_OUTPUT_DIR,
+        help="Install location for auto-downloaded Qt Creator (default: third_party/qtcreator).",
+    )
 
     menu_parser = subparsers.add_parser(
         "menu",
@@ -1480,7 +1599,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "open-qml":
         qml_path = choose_qml_file(getattr(args, "qml_file", None))
-        open_qml_in_qt_creator(qml_path)
+        open_qml_in_qt_creator(
+            qml_path,
+            ensure_creator=getattr(args, "ensure_qt_creator", False),
+            creator_version=getattr(args, "qt_creator_version", None),
+            creator_output_dir=getattr(args, "qt_creator_output_dir", DEFAULT_QT_CREATOR_OUTPUT_DIR),
+        )
         return 0
 
     if args.command == "check-updates":
@@ -1599,7 +1723,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if choice == "open-qml":
             qml_path = choose_qml_file(None)
-            open_qml_in_qt_creator(qml_path)
+            open_qml_in_qt_creator(qml_path, ensure_creator=True)
             return 0
         if choice == "check-updates":
             check_library_updates(args.qt_prefix)
