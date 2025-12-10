@@ -51,3 +51,12 @@ build\sample_app.exe
 ```sh
 ctest --test-dir build
 ```
+
+## PDCursesMod (WinCon)
+
+The WinCon flavor of [PDCursesMod](https://github.com/Bill-Gray/PDCursesMod) v4.5.3 is vendored in `third_party/PDCursesMod` and exposed via the CMake target `PDCursesMod::pdcurses`. It is built as a static library with only the WinCon backend (no SDL/OpenGL extras) when `BUILD_PDCURSES_WINCON` is ON (default on Windows).
+
+Link it to your target, for example:
+```cmake
+target_link_libraries(your_target PRIVATE PDCursesMod::pdcurses)
+```

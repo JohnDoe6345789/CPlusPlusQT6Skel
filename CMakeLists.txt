@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(CPlusPlusQT6Skel VERSION 0.1 LANGUAGES CXX)
+project(CPlusPlusQT6Skel VERSION 0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,53 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Qml Test)
 
 qt_standard_project_setup()
+
+option(BUILD_PDCURSES_WINCON "Build the WinCon flavor of PDCursesMod (static library)" ON)
+set(PDCURSES_MOD_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/PDCursesMod")
+
+if(BUILD_PDCURSES_WINCON AND WIN32 AND EXISTS "${PDCURSES_MOD_ROOT}/curses.h")
+    file(GLOB PDCURSES_CORE_SOURCES CONFIGURE_DEPENDS
+        "${PDCURSES_MOD_ROOT}/pdcurses/*.c"
+    )
+
+    set(PDCURSES_WINCON_SOURCES
+        "${PDCURSES_MOD_ROOT}/wincon/pdcclip.c"
+        "${PDCURSES_MOD_ROOT}/wincon/pdcdisp.c"
+        "${PDCURSES_MOD_ROOT}/wincon/pdcgetsc.c"
+        "${PDCURSES_MOD_ROOT}/wincon/pdckbd.c"
+        "${PDCURSES_MOD_ROOT}/wincon/pdcscrn.c"
+        "${PDCURSES_MOD_ROOT}/wincon/pdcsetsc.c"
+        "${PDCURSES_MOD_ROOT}/wincon/pdcutil.c"
+    )
+
+    add_library(pdcursesmod STATIC
+        ${PDCURSES_CORE_SOURCES}
+        ${PDCURSES_WINCON_SOURCES}
+    )
+    add_library(PDCursesMod::pdcurses ALIAS pdcursesmod)
+
+    target_include_directories(pdcursesmod PUBLIC
+        ${PDCURSES_MOD_ROOT}
+        ${PDCURSES_MOD_ROOT}/wincon
+    )
+
+    if(MSVC)
+        target_compile_definitions(pdcursesmod PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+
+    # Match the upstream WinCon build's default link dependencies.
+    target_link_libraries(pdcursesmod PUBLIC
+        gdi32
+        winspool
+        shell32
+        ole32
+        comdlg32
+        advapi32
+        winmm
+    )
+elseif(BUILD_PDCURSES_WINCON)
+    message(WARNING "PDCursesMod sources not found or unsupported platform; skipping WinCon build.")
+endif()
 
 add_library(sample_support STATIC
     src/greeter.cpp
