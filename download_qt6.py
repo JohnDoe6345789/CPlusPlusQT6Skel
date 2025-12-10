@@ -38,7 +38,12 @@ DEFAULT_MODULES = [
 ]
 
 DEFAULT_QT_VERSION = "6.7.2"
-DEFAULT_COMPILER = "win64_msvc2019_64"
+DEFAULT_WINDOWS_COMPILER = "win64_msvc2019_64"
+DEFAULT_COMPILERS = {
+    "windows": DEFAULT_WINDOWS_COMPILER,
+    "linux": "linux_gcc_64",
+    "mac": "clang_64",
+}
 
 
 def run(cmd: List[str], *, dry_run: bool) -> None:
@@ -128,6 +133,17 @@ def build_install_src_cmd(args: argparse.Namespace) -> List[str]:
     return cmd
 
 
+def detect_host() -> str:
+    """Map Python platform markers to the aqt host string."""
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "mac"
+    return "windows"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download Qt 6 binaries (and optional build tools) using aqtinstall."
@@ -145,8 +161,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--host",
-        default="windows",
-        help="Host OS for binaries (windows, linux, mac).",
+        default=None,
+        help="Host OS for binaries (windows, linux, mac). If omitted, detected from the running OS.",
     )
     parser.add_argument(
         "--target",
@@ -192,6 +208,16 @@ def parse_args() -> argparse.Namespace:
         "--src-archives",
         nargs="*",
         help="Specific source archives (omit to fetch the whole Qt source bundle).",
+    )
+    parser.add_argument(
+        "--check-build-deps",
+        action="store_true",
+        help="Verify native build prerequisites for the host (Linux/macOS).",
+    )
+    parser.add_argument(
+        "--install-build-deps",
+        action="store_true",
+        help="Attempt to install missing build prerequisites using apt/dnf/brew. Implies --check-build-deps.",
     )
     return parser.parse_args()
 
@@ -295,13 +321,92 @@ def detect_latest_qt_version(
     return None
 
 
-def main() -> None:
-    args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
+def _read_os_release() -> Tuple[Optional[str], Optional[str]]:
+    """Return (id, version_id) from /etc/os-release if present."""
+    path = "/etc/os-release"
+    if not os.path.exists(path):
+        return None, None
+    data: dict[str, str] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if "=" not in line:
+                continue
+            key, value = line.strip().split("=", 1)
+            data[key] = value.strip('"')
+    return data.get("ID"), data.get("VERSION_ID")
 
-    ensure_aqtinstall(dry_run=args.dry_run)
 
-    if args.compiler is None:
+def _command_exists(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def check_build_dependencies(
+    *,
+    host: str,
+    install: bool,
+    dry_run: bool,
+) -> None:
+    """Validate and optionally install native build toolchains for Linux/macOS."""
+
+    def maybe_install(cmd: List[str]) -> None:
+        if install:
+            run(cmd, dry_run=dry_run)
+        else:
+            print("Missing dependency; rerun with --install-build-deps to install:")
+            print(" ", " ".join(cmd))
+
+    if host == "mac":
+        print("Checking macOS build tools (Xcode Command Line Tools, Homebrew, CMake, Ninja)...")
+        try:
+            subprocess.check_output(["xcode-select", "-p"])
+            xcode_ok = True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            xcode_ok = False
+
+        if not xcode_ok:
+            print("Xcode Command Line Tools not found.")
+            maybe_install(["xcode-select", "--install"])
+        brew_ok = _command_exists("brew")
+        if not brew_ok:
+            print("Homebrew not found.")
+            print("Install Homebrew first: https://brew.sh/")
+        for tool in ("cmake", "ninja"):
+            if _command_exists(tool):
+                continue
+            if brew_ok:
+                maybe_install(["brew", "install", tool])
+            else:
+                print(f"{tool} missing and Homebrew not available.")
+        return
+
+    if host == "linux":
+        distro_id, version_id = _read_os_release()
+        print(f"Detected Linux distro: {distro_id or 'unknown'} {version_id or ''}".strip())
+        if distro_id in {"ubuntu", "debian"}:
+            required = ["build-essential", "libgl1-mesa-dev", "libxkbcommon-x11-0", "ninja-build", "cmake"]
+            for cmd in (["sudo", "apt-get", "update"], ["sudo", "apt-get", "install", "-y", *required]):
+                maybe_install(cmd)
+            return
+        if distro_id in {"fedora", "rhel", "centos", "rocky", "almalinux"}:
+            required = ["mesa-libGL-devel", "libxkbcommon-devel", "ninja-build", "cmake"]
+            for cmd in (
+                ["sudo", "dnf", "groupinstall", "-y", "Development Tools"],
+                ["sudo", "dnf", "install", "-y", *required],
+            ):
+                maybe_install(cmd)
+            return
+        print("Unknown Linux distro; ensure you have a C++ toolchain, CMake, Ninja, and OpenGL headers installed.")
+        return
+
+    print("Skipping build dependency check for host:", host)
+
+
+def resolve_compiler(args: argparse.Namespace) -> str:
+    """Pick a compiler tuple based on host and optional detection."""
+    if args.compiler:
+        return args.compiler
+
+    if args.host == "windows":
         detected_compiler, detected_major, raw_vs_version = detect_msvc_compiler()
         if detected_compiler:
             if detected_major:
@@ -311,18 +416,40 @@ def main() -> None:
                 )
             else:
                 print(f"Detected Visual Studio toolset; using compiler: {detected_compiler}")
-            args.compiler = detected_compiler
+            return detected_compiler
+
+        if detected_major is not None and detected_major < 16:
+            print(
+                "Detected Visual Studio appears older than 2019 "
+                "(Qt 6 binaries target MSVC 2019/2022). "
+                "Please upgrade Visual Studio for best compatibility."
+            )
         else:
-            if detected_major is not None and detected_major < 16:
-                print(
-                    "Detected Visual Studio appears older than 2019 "
-                    "(Qt 6 binaries target MSVC 2019/2022). "
-                    "Please upgrade Visual Studio for best compatibility."
-                )
-            else:
-                print("Could not detect Visual Studio.")
-            print(f"Defaulting to {DEFAULT_COMPILER}")
-            args.compiler = DEFAULT_COMPILER
+            print("Could not detect Visual Studio.")
+
+    fallback = DEFAULT_COMPILERS.get(args.host, DEFAULT_WINDOWS_COMPILER)
+    print(f"Defaulting to {fallback}")
+    return fallback
+
+
+def main() -> None:
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    ensure_aqtinstall(dry_run=args.dry_run)
+
+    if args.host is None:
+        args.host = detect_host()
+        print(f"Detected host OS: {args.host}")
+
+    if args.check_build_deps or args.install_build_deps:
+        check_build_dependencies(
+            host=args.host,
+            install=args.install_build_deps,
+            dry_run=args.dry_run,
+        )
+
+    args.compiler = resolve_compiler(args)
 
     if args.qt_version is None:
         detected_qt = detect_latest_qt_version(
