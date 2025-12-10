@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -282,26 +283,60 @@ def detect_latest_qt_version(
     target: str,
     base_url: Optional[str],
     timeout: Optional[int],
+    compiler: Optional[str],
 ) -> Optional[str]:
-    """Ask aqt for the newest Qt version available for the given host/target."""
+    """Ask aqt for the newest Qt version available for the given host/target, validating availability."""
 
     if importlib.util.find_spec("aqt") is None:
         return None
 
-    def _build_cmd() -> List[str]:
+    def _build_cmd(extra: Optional[str] = None) -> List[str]:
         cmd = [sys.executable, "-m", "aqt", "list-qt", host, target]
+        if extra:
+            cmd.append(extra)
         if base_url:
             cmd.extend(["--base", base_url])
         if timeout:
             cmd.extend(["--timeout", str(timeout)])
         return cmd
 
-    commands = [
-        _build_cmd() + ["--latest-version"],
-        _build_cmd(),
-    ]
+    def _version_key(v: str) -> Tuple[int, ...]:
+        # Keep only numeric components to allow simple sorting (e.g., 6.10.1).
+        parts = re.split(r"[^\d]+", v)
+        nums = []
+        for p in parts:
+            if p == "":
+                continue
+            try:
+                nums.append(int(p))
+            except ValueError:
+                nums.append(0)
+        return tuple(nums)
 
-    for cmd in commands:
+    def _list_versions() -> List[str]:
+        try:
+            output = subprocess.check_output(
+                _build_cmd(),
+                text=True,
+                encoding="utf-8",
+                timeout=timeout if timeout else None,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return []
+        versions: List[str] = []
+        for line in output.splitlines():
+            for token in line.strip().split():
+                if token:
+                    versions.append(token)
+        return versions
+
+    def _version_has_archives(version: str) -> bool:
+        # Validate by asking aqt for available architectures for the version; if it errors, skip it.
+        cmd = [sys.executable, "-m", "aqt", "list-qt", host, target, "--arch", version]
+        if base_url:
+            cmd.extend(["--base", base_url])
+        if timeout:
+            cmd.extend(["--timeout", str(timeout)])
         try:
             output = subprocess.check_output(
                 cmd,
@@ -310,13 +345,19 @@ def detect_latest_qt_version(
                 timeout=timeout if timeout else None,
             )
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            continue
+            return False
+        if not output.strip():
+            return False
+        if compiler:
+            archs = {token for line in output.splitlines() for token in line.strip().split() if token}
+            if compiler not in archs:
+                return False
+        return True
 
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
-        if not lines:
-            continue
-        # Both list outputs end with the most recent version.
-        return lines[-1]
+    versions = _list_versions()
+    for version in sorted(versions, key=_version_key, reverse=True):
+        if _version_has_archives(version):
+            return version
 
     return None
 
@@ -434,6 +475,8 @@ def resolve_compiler(args: argparse.Namespace) -> str:
 
 def main() -> None:
     args = parse_args()
+    user_supplied_qt_version = args.qt_version is not None
+    auto_detected_qt_version: Optional[str] = None
     os.makedirs(args.output_dir, exist_ok=True)
 
     ensure_aqtinstall(dry_run=args.dry_run)
@@ -457,16 +500,34 @@ def main() -> None:
             target=args.target,
             base_url=args.base_url,
             timeout=args.timeout,
+            compiler=args.compiler,
         )
         if detected_qt:
             print(f"Detected latest Qt version: {detected_qt}")
             args.qt_version = detected_qt
+            auto_detected_qt_version = detected_qt
         else:
             print(f"Could not detect latest Qt version; defaulting to {DEFAULT_QT_VERSION}")
             args.qt_version = DEFAULT_QT_VERSION
 
     install_qt_cmd = build_install_qt_cmd(args)
-    run(install_qt_cmd, dry_run=args.dry_run)
+    try:
+        run(install_qt_cmd, dry_run=args.dry_run)
+    except subprocess.CalledProcessError:
+        if (
+            not user_supplied_qt_version
+            and auto_detected_qt_version
+            and auto_detected_qt_version != DEFAULT_QT_VERSION
+        ):
+            print(
+                f"Failed to install detected Qt version {auto_detected_qt_version}; "
+                f"falling back to {DEFAULT_QT_VERSION}."
+            )
+            args.qt_version = DEFAULT_QT_VERSION
+            install_qt_cmd = build_install_qt_cmd(args)
+            run(install_qt_cmd, dry_run=args.dry_run)
+        else:
+            raise
 
     if args.with_tools:
         for cmd in build_install_tools_cmds(args):
