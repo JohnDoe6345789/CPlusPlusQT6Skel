@@ -88,6 +88,17 @@ DEFAULT_SETTINGS = {
     "default_run_targets": DEFAULT_RUN_TARGETS,
 }
 
+SETTING_DESCRIPTIONS: dict[str, str] = {
+    "build_dir": "Build directory (default: settings file or ./build)",
+    "build_type": "CMAKE_BUILD_TYPE for single-config generators (default: Debug)",
+    "qt_prefix": "Path to Qt installation root",
+    "generator": "CMake generator to use",
+    "download_qt_output_dir": "Destination for auto-downloaded Qt (default: third_party/qt6)",
+    "download_qt_version": "Qt version to fetch when automatically downloading",
+    "download_qt_compiler": "Qt compiler flavor/arch used for downloads (e.g. win64_msvc2022_64)",
+    "default_run_targets": "Default targets to offer when running or launching the menu",
+}
+
 
 def _config_dir() -> Path:
     if sys.platform.startswith("win"):
@@ -1549,23 +1560,55 @@ def _parse_setting_arg(arg: str) -> tuple[str, str]:
 
 
 def edit_settings_interactive(settings: dict) -> dict:
-    """Simple prompt-driven editor."""
+    """TTY-driven settings menu."""
     if not sys.stdin.isatty():
         print("Interactive edit requires a TTY. Use --set KEY=VALUE instead.")
         return settings
 
-    print("Press Enter to keep the current value. Type 'none' to clear optional values.")
-    updates: dict = {}
-    for key in DEFAULT_SETTINGS:
-        current = settings.get(key)
-        prompt = f"{key} [{current!r}]: "
-        new_value = input(prompt).strip()
+    keys = list(DEFAULT_SETTINGS)
+    draft = dict(settings)
+    updates: dict[str, Optional[str]] = {}
+
+    print(
+        "Select a setting to edit from the numbered list below. "
+        "Press Enter without a selection to finish, or type 'q' to quit."
+    )
+    print("Type 'none' (or 'null') when you want to clear an optional value.\n")
+
+    while True:
+        print()
+        print("Settings file:", _config_path())
+        for idx, key in enumerate(keys, start=1):
+            desc = SETTING_DESCRIPTIONS.get(key)
+            value = draft.get(key)
+            desc_text = f" - {desc}" if desc else ""
+            print(f"[{idx}] {key}{desc_text} (current: {value!r})")
+        choice = input(f"Select [1-{len(keys)}] (Enter to finish): ").strip()
+        if not choice:
+            break
+        if choice.lower() in {"q", "quit", "exit"}:
+            break
+        if not choice.isdigit():
+            print("Invalid selection, enter a number or 'q'.")
+            continue
+        index = int(choice)
+        if not (1 <= index <= len(keys)):
+            print(f"Invalid number (1-{len(keys)}).")
+            continue
+        key = keys[index - 1]
+        current_value = draft.get(key)
+        new_value = input(
+            f"New value for {key} [{current_value!r}] (Enter to keep): "
+        ).strip()
         if not new_value:
             continue
         if new_value.lower() in {"none", "null"}:
+            draft[key] = None
             updates[key] = None
-        else:
-            updates[key] = new_value
+            continue
+        draft[key] = new_value
+        updates[key] = new_value
+
     if updates:
         return set_settings(updates)
     return settings
