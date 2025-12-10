@@ -15,11 +15,12 @@ More docs: https://aqtinstall.readthedocs.io/
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
-from typing import Iterable, List
+from typing import Iterable, List, Optional, Tuple
 
 
 DEFAULT_MODULES = [
@@ -35,6 +36,9 @@ DEFAULT_MODULES = [
     "qtquick3d",
     "qtquickcontrols",
 ]
+
+DEFAULT_QT_VERSION = "6.7.2"
+DEFAULT_COMPILER = "win64_msvc2019_64"
 
 
 def run(cmd: List[str], *, dry_run: bool) -> None:
@@ -130,13 +134,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--qt-version",
-        default="6.7.2",
-        help="Qt version to download (e.g. 6.7.2).",
+        default=None,
+        help="Qt version to download (e.g. 6.7.2). If omitted, the latest available is used.",
     )
     parser.add_argument(
         "--compiler",
-        default="win64_msvc2019_64",
-        help="Qt compiler flavor/arch (e.g. win64_msvc2019_64, win64_msvc2022_64, win64_mingw).",
+        default=None,
+        help="Qt compiler flavor/arch (e.g. win64_msvc2019_64, win64_msvc2022_64, win64_mingw). "
+        "If omitted on Windows, the newest installed Visual Studio dictates the default.",
     )
     parser.add_argument(
         "--host",
@@ -191,11 +196,147 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _vswhere_path() -> Optional[str]:
+    """Return vswhere.exe path if present."""
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    if not program_files_x86:
+        return None
+    path = os.path.join(
+        program_files_x86,
+        "Microsoft Visual Studio",
+        "Installer",
+        "vswhere.exe",
+    )
+    return path if os.path.exists(path) else None
+
+
+def detect_msvc_compiler() -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """Detect latest installed MSVC toolset and map it to a Qt arch string.
+
+    Returns (compiler_arch, major_version, raw_version_str).
+    """
+    vswhere = _vswhere_path()
+    if not vswhere:
+        return None, None, None
+
+    cmd = [
+        vswhere,
+        "-latest",
+        "-products",
+        "*",
+        "-requires",
+        "Microsoft.Component.MSBuild",
+        "-property",
+        "installationVersion",
+    ]
+
+    try:
+        raw_version = (
+            subprocess.check_output(cmd, text=True, encoding="utf-8").strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None, None, None
+
+    try:
+        major = int(raw_version.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return None, None, raw_version
+
+    # Map Visual Studio major version to the corresponding Qt arch identifier.
+    if major >= 17:
+        return "win64_msvc2022_64", major, raw_version
+    if major >= 16:
+        return "win64_msvc2019_64", major, raw_version
+    return None, major, raw_version
+
+
+def detect_latest_qt_version(
+    *,
+    host: str,
+    target: str,
+    base_url: Optional[str],
+    timeout: Optional[int],
+) -> Optional[str]:
+    """Ask aqt for the newest Qt version available for the given host/target."""
+
+    if importlib.util.find_spec("aqt") is None:
+        return None
+
+    def _build_cmd() -> List[str]:
+        cmd = [sys.executable, "-m", "aqt", "list-qt", host, target]
+        if base_url:
+            cmd.extend(["--base", base_url])
+        if timeout:
+            cmd.extend(["--timeout", str(timeout)])
+        return cmd
+
+    commands = [
+        _build_cmd() + ["--latest-version"],
+        _build_cmd(),
+    ]
+
+    for cmd in commands:
+        try:
+            output = subprocess.check_output(
+                cmd,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout if timeout else None,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines:
+            continue
+        # Both list outputs end with the most recent version.
+        return lines[-1]
+
+    return None
+
+
 def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
     ensure_aqtinstall(dry_run=args.dry_run)
+
+    if args.compiler is None:
+        detected_compiler, detected_major, raw_vs_version = detect_msvc_compiler()
+        if detected_compiler:
+            if detected_major:
+                print(
+                    f"Detected Visual Studio {detected_major} (version {raw_vs_version}); "
+                    f"using compiler: {detected_compiler}"
+                )
+            else:
+                print(f"Detected Visual Studio toolset; using compiler: {detected_compiler}")
+            args.compiler = detected_compiler
+        else:
+            if detected_major is not None and detected_major < 16:
+                print(
+                    "Detected Visual Studio appears older than 2019 "
+                    "(Qt 6 binaries target MSVC 2019/2022). "
+                    "Please upgrade Visual Studio for best compatibility."
+                )
+            else:
+                print("Could not detect Visual Studio.")
+            print(f"Defaulting to {DEFAULT_COMPILER}")
+            args.compiler = DEFAULT_COMPILER
+
+    if args.qt_version is None:
+        detected_qt = detect_latest_qt_version(
+            host=args.host,
+            target=args.target,
+            base_url=args.base_url,
+            timeout=args.timeout,
+        )
+        if detected_qt:
+            print(f"Detected latest Qt version: {detected_qt}")
+            args.qt_version = detected_qt
+        else:
+            print(f"Could not detect latest Qt version; defaulting to {DEFAULT_QT_VERSION}")
+            args.qt_version = DEFAULT_QT_VERSION
 
     install_qt_cmd = build_install_qt_cmd(args)
     run(install_qt_cmd, dry_run=args.dry_run)

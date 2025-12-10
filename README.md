@@ -5,14 +5,14 @@ Hello World Skel files for C++ QT6
 
 Use `download_qt6.py` to fetch prebuilt Qt 6 binaries (and optionally source) into the repo so builds work offline.
 
-### Quick start (Windows desktop, MSVC 2019 x64)
+### Quick start (Windows desktop, auto-detect)
 ```sh
 python download_qt6.py
 ```
-Downloads Qt 6.7.2 to `third_party/qt6` with common GUI modules.
+Automatically selects your newest installed Visual Studio toolset (preferring VS 2022) and the latest Qt 6 release, then downloads it to `third_party/qt6` with common GUI modules.
 
 ### Customizing
-- Pick version/arch/output:  
+- Pick version/arch/output (overrides auto-detection):  
   `python download_qt6.py --qt-version 6.6.3 --compiler win64_msvc2022_64 --output-dir vendor/qt6`
 - Minimal modules:  
   `python download_qt6.py --modules qtbase qtdeclarative`
