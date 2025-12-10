@@ -30,3 +30,24 @@ third_party/qt6/
   6.7.2/desktop/...
   6.7.2/Src/...   # only if --with-src
 ```
+
+## Sample Qt Quick app + tests
+
+This repo now contains a minimal Qt 6 + QML app (`sample_app`) plus a small test suite.
+
+### Configure and build (Windows, Ninja + MSVC example)
+```sh
+cmake -B build -G "Ninja" ^
+  -DCMAKE_PREFIX_PATH=%CD%\third_party\qt6\6.10.1\msvc2022_64
+cmake --build build
+```
+
+### Run the app
+```sh
+build\sample_app.exe
+```
+
+### Run tests
+```sh
+ctest --test-dir build
+```
