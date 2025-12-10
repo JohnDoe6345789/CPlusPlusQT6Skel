@@ -80,28 +80,156 @@ def parse_version_from_path(path: Path) -> Tuple[int, ...]:
     return tuple()
 
 
-def autodetect_qt_prefix() -> Optional[Path]:
+def detect_qt_flavor(path: Path) -> Optional[str]:
+    """Return 'mingw' or 'msvc' based on path segments (Windows-only heuristic)."""
+    lower_parts = [part.lower() for part in path.parts]
+    if any("mingw" in part for part in lower_parts):
+        return "mingw"
+    if any("msvc" in part for part in lower_parts):
+        return "msvc"
+    return None
+
+
+def detect_compiler_flavor(generator: Optional[str]) -> Optional[str]:
+    """
+    Best-effort guess of Windows toolchain flavor so we can match Qt binaries.
+    Returns "msvc", "mingw", or None when unsure/not Windows.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+
+    gen = (generator or os.environ.get("CMAKE_GENERATOR") or "").lower()
+    if "visual studio" in gen or "msvc" in gen:
+        return "msvc"
+    if "mingw" in gen:
+        return "mingw"
+
+    for env_var in ("CXX", "CC"):
+        compiler = os.environ.get(env_var)
+        if not compiler:
+            continue
+        name = Path(compiler).name.lower()
+        if name in {"cl", "cl.exe"} or "msvc" in name:
+            return "msvc"
+        if "mingw" in name or name.startswith("g++") or name.startswith("gcc"):
+            return "mingw"
+
+    cl_path = shutil.which("cl")
+    if cl_path:
+        return "msvc"
+    gxx_path = shutil.which("g++")
+    if gxx_path and "mingw" in gxx_path.lower():
+        return "mingw"
+    return None
+
+
+def enforce_qt_toolchain_match(qt_prefix: Optional[Path], generator: Optional[str]) -> None:
+    """
+    Fail fast when the detected compiler flavor and Qt binaries obviously conflict.
+    Avoids slow/cryptic linker errors when mixing MSVC Qt with MinGW (or vice versa).
+    """
+    if not qt_prefix or not sys.platform.startswith("win"):
+        return
+    compiler_flavor = detect_compiler_flavor(generator)
+    qt_flavor = detect_qt_flavor(qt_prefix)
+    if compiler_flavor and qt_flavor and compiler_flavor != qt_flavor:
+        raise SystemExit(
+            f"Qt install {qt_prefix} looks like {qt_flavor.upper()}, "
+            f"but your compiler/generator looks like {compiler_flavor.upper()}.\n"
+            "Use a matching Qt download (e.g. download_qt6.py --compiler win64_mingw) "
+            "or switch to the corresponding toolchain/generator."
+        )
+
+
+def download_qt_with_script(
+    *,
+    qt_version: Optional[str],
+    compiler: Optional[str],
+    output_dir: Path,
+    base_url: Optional[str] = None,
+    with_tools: bool = False,
+) -> None:
+    """Invoke download_qt6.py with a small, typed surface."""
+    script = ROOT / "download_qt6.py"
+    if not script.exists():
+        raise SystemExit(f"download_qt6.py not found at {script}")
+    cmd: List[str] = [sys.executable, str(script)]
+    if qt_version:
+        cmd += ["--qt-version", qt_version]
+    if compiler:
+        cmd += ["--compiler", compiler]
+    if output_dir:
+        cmd += ["--output-dir", str(output_dir)]
+    if base_url:
+        cmd += ["--base-url", base_url]
+    if with_tools:
+        cmd.append("--with-tools")
+    print("Qt not found; downloading with download_qt6.py...")
+    run_command(cmd)
+
+
+def ensure_qt_prefix(
+    *,
+    args: argparse.Namespace,
+    generator: Optional[str],
+) -> Optional[Path]:
+    """Resolve Qt prefix; optionally auto-download when missing."""
+    def _resolve() -> Optional[Path]:
+        return resolve_qt_prefix(args.qt_prefix, generator)
+
+    qt_prefix = _resolve()
+    if qt_prefix or not getattr(args, "download_qt_if_missing", False):
+        return qt_prefix
+
+    compiler_arg = args.download_qt_compiler
+    if not compiler_arg and sys.platform.startswith("win"):
+        flavor = detect_compiler_flavor(generator)
+        if flavor == "mingw":
+            compiler_arg = "win64_mingw"
+        # For MSVC, let download_qt6.py auto-detect via vswhere.
+
+    download_qt_with_script(
+        qt_version=args.download_qt_version,
+        compiler=compiler_arg,
+        output_dir=args.download_qt_output_dir,
+    )
+    return _resolve()
+
+
+def autodetect_qt_prefix(preferred_flavor: Optional[str] = None) -> Optional[Path]:
     """
     Try to guess a Qt prefix by looking under third_party/qt6/**/lib/cmake/Qt6.
-    Picks the highest semantic version it can find.
+    Picks the highest semantic version it can find, preferring a flavor that
+    matches the detected compiler (msvc vs mingw) when on Windows.
     """
     qt_root = ROOT / "third_party" / "qt6"
     if not qt_root.exists():
         return None
 
-    candidates: list[tuple[Tuple[int, ...], Path]] = []
+    candidates: list[tuple[Tuple[int, ...], Optional[str], Path]] = []
     for cmake_dir in qt_root.rglob("lib/cmake/Qt6"):
         prefix = cmake_dir.parents[2]  # lib/cmake/Qt6 -> lib -> <prefix>
-        candidates.append((parse_version_from_path(prefix), prefix))
+        candidates.append((parse_version_from_path(prefix), detect_qt_flavor(prefix), prefix))
 
     if not candidates:
         return None
 
-    candidates.sort()
-    return candidates[-1][1]
+    def pick_best(items: list[tuple[Tuple[int, ...], Optional[str], Path]]) -> Optional[Path]:
+        if not items:
+            return None
+        items.sort(key=lambda tup: tup[0])
+        return items[-1][2]
+
+    if preferred_flavor:
+        matching = [item for item in candidates if item[1] == preferred_flavor]
+        chosen = pick_best(matching)
+        if chosen:
+            return chosen
+
+    return pick_best(candidates)
 
 
-def resolve_qt_prefix(cli_value: Optional[str]) -> Optional[Path]:
+def resolve_qt_prefix(cli_value: Optional[str], generator: Optional[str] = None) -> Optional[Path]:
     """
     Resolve the Qt prefix directory, honoring CLI, env, or auto-detection.
     Returns None if nothing is found so CMake can still try system Qt installs.
@@ -123,7 +251,8 @@ def resolve_qt_prefix(cli_value: Optional[str]) -> Optional[Path]:
         if path.exists():
             return path
 
-    return autodetect_qt_prefix()
+    preferred_flavor = detect_compiler_flavor(generator)
+    return autodetect_qt_prefix(preferred_flavor)
 
 
 def detect_generator(cli_value: Optional[str]) -> Optional[str]:
@@ -383,9 +512,18 @@ def verify_environment(
             f"e.g. \"{ninja_hint}\" or set CMAKE_GENERATOR/--generator."
         )
 
-    resolved_qt = resolve_qt_prefix(str(qt_prefix) if qt_prefix else None)
+    resolved_qt = resolve_qt_prefix(str(qt_prefix) if qt_prefix else None, detected_gen)
+    compiler_flavor = detect_compiler_flavor(detected_gen)
     if resolved_qt:
         print(f" - Qt prefix: {resolved_qt}")
+        qt_flavor = detect_qt_flavor(resolved_qt)
+        if compiler_flavor and qt_flavor and compiler_flavor != qt_flavor:
+            ok = False
+            print(
+                f" - Qt/toolchain mismatch: Qt looks like {qt_flavor.upper()} but "
+                f"your compiler/generator looks like {compiler_flavor.upper()}. "
+                "Download a matching Qt build or switch toolchains."
+            )
     else:
         ok = False
         qt_hint = package_install_hint("qt")
@@ -449,6 +587,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument("--config", help="--config value for multi-config generators")
         p.add_argument("--qt-prefix", help="Path to Qt installation root")
         p.add_argument("--generator", help="CMake generator to use")
+        p.add_argument(
+            "--download-qt-if-missing",
+            action="store_true",
+            help="Automatically run download_qt6.py when Qt is not found.",
+        )
+        p.add_argument(
+            "--download-qt-version",
+            help="Qt version to fetch when auto-downloading (forwards to download_qt6.py).",
+        )
+        p.add_argument(
+            "--download-qt-compiler",
+            help="Qt compiler flavor/arch for auto-download (e.g. win64_mingw).",
+        )
+        p.add_argument(
+            "--download-qt-output-dir",
+            type=Path,
+            default=ROOT / "third_party" / "qt6",
+            help="Where to place auto-downloaded Qt (default: third_party/qt6).",
+        )
 
     add_common_arguments(parser)
 
@@ -506,6 +663,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     add_common_arguments(verify_parser)
 
+    download_parser = subparsers.add_parser(
+        "download-qt",
+        help="Fetch Qt using the bundled download_qt6.py helper",
+    )
+    download_parser.add_argument("--qt-version", help="Qt version to download")
+    download_parser.add_argument(
+        "--compiler",
+        help="Qt compiler flavor/arch (e.g. win64_mingw, win64_msvc2022_64)",
+    )
+    download_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=ROOT / "third_party" / "qt6",
+        help="Destination directory (default: third_party/qt6)",
+    )
+    download_parser.add_argument(
+        "--base-url",
+        help="Mirror base URL to pass through to download_qt6.py",
+    )
+    download_parser.add_argument(
+        "--with-tools",
+        action="store_true",
+        help="Also download Ninja and CMake via Qt maintenance tool archives.",
+    )
+
     menu_parser = subparsers.add_parser(
         "menu",
         help="Interactive mode to build, test, or run targets",
@@ -527,27 +709,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.program_args = getattr(args, "program_args", [])
         args.skip_build = getattr(args, "skip_build", False)
 
+    if args.command == "download-qt":
+        compiler_arg = args.compiler
+        if not compiler_arg and sys.platform.startswith("win"):
+            flavor = detect_compiler_flavor(None)
+            if flavor == "mingw":
+                compiler_arg = "win64_mingw"
+        download_qt_with_script(
+            qt_version=args.qt_version,
+            compiler=compiler_arg,
+            output_dir=args.output_dir,
+            base_url=args.base_url,
+            with_tools=args.with_tools,
+        )
+        return 0
+
     build_dir = args.build_dir.resolve()
-    qt_prefix = resolve_qt_prefix(args.qt_prefix)
     generator = detect_generator(args.generator)
+    qt_prefix = ensure_qt_prefix(args=args, generator=generator)
     build_type = args.build_type or DEFAULT_BUILD_TYPE
 
     if args.command == "verify":
-        ok = verify_environment(args.qt_prefix, generator)
+        ok = verify_environment(qt_prefix, generator)
         return 0 if ok else 1
 
     if args.command == "build":
+        enforce_qt_toolchain_match(qt_prefix, generator)
         configure_project(build_dir, generator, build_type, qt_prefix)
         build_targets(build_dir, generator, build_type, args.target, args.config)
         return 0
 
     if args.command == "test":
+        enforce_qt_toolchain_match(qt_prefix, generator)
         configure_project(build_dir, generator, build_type, qt_prefix)
         build_targets(build_dir, generator, build_type, [], args.config)
         run_tests(build_dir, generator, build_type, args.config, args.ctest_args)
         return 0
 
     if args.command == "run":
+        enforce_qt_toolchain_match(qt_prefix, generator)
         configure_project(build_dir, generator, build_type, qt_prefix)
         available_targets = list_runnable_targets(
             build_dir, generator, build_type, args.config
@@ -575,16 +775,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ok = verify_environment(args.qt_prefix, generator)
             return 0 if ok else 1
         if choice == "build":
+            enforce_qt_toolchain_match(qt_prefix, generator)
             configure_project(build_dir, generator, build_type, qt_prefix)
             build_targets(build_dir, generator, build_type, [], args.config)
             return 0
         if choice == "test":
+            enforce_qt_toolchain_match(qt_prefix, generator)
             configure_project(build_dir, generator, build_type, qt_prefix)
             build_targets(build_dir, generator, build_type, [], args.config)
             run_tests(build_dir, generator, build_type, args.config, [])
             return 0
         if choice == "run":
             do_build = prompt_yes_no("Build before running?", default=True)
+            enforce_qt_toolchain_match(qt_prefix, generator)
             configure_project(build_dir, generator, build_type, qt_prefix)
             available_targets = list_runnable_targets(
                 build_dir, generator, build_type, args.config

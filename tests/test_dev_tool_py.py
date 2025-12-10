@@ -11,6 +11,7 @@ class DevToolCLITests(TestCase):
             tmp_path = Path(tmp)
             with mock.patch.object(dev_tool, "DEFAULT_BUILD_DIR", tmp_path), \
                 mock.patch("dev_tool.detect_generator", return_value=None), \
+                mock.patch("dev_tool.resolve_qt_prefix", return_value=None), \
                 mock.patch("dev_tool.prompt_for_choice", return_value="quit"), \
                 mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch("dev_tool.run_command") as run_cmd:
@@ -26,6 +27,7 @@ class DevToolCLITests(TestCase):
             tmp_path = Path(tmp)
             with mock.patch.object(dev_tool, "DEFAULT_BUILD_DIR", tmp_path), \
                 mock.patch("dev_tool.detect_generator", return_value=None), \
+                mock.patch("dev_tool.resolve_qt_prefix", return_value=None), \
                 mock.patch("sys.stdin.isatty", return_value=False), \
                 mock.patch("dev_tool.run_command") as run_cmd:
                 result = dev_tool.main([])
@@ -42,6 +44,7 @@ class DevToolCLITests(TestCase):
             fake_exe.touch()
             with mock.patch.object(dev_tool, "DEFAULT_BUILD_DIR", tmp_path), \
                 mock.patch("dev_tool.detect_generator", return_value=None), \
+                mock.patch("dev_tool.resolve_qt_prefix", return_value=None), \
                 mock.patch("dev_tool.prompt_for_choice", return_value="sample_cli"), \
                 mock.patch("dev_tool.list_runnable_targets", return_value=["sample_cli"]), \
                 mock.patch("sys.stdin.isatty", return_value=True), \
