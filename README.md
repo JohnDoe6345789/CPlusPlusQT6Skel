@@ -35,6 +35,8 @@ third_party/qt6/
 
 `dev_tool.py` wraps common CMake actions for Windows, macOS, and Linux. It auto-picks Ninja if present (otherwise defers to CMake's default), reconfigures on each call, and tries to find Qt under `third_party/qt6` (or honors `QT_PREFIX_PATH` / `--qt-prefix`).
 
+User defaults (build dir/type, Qt prefix, generator, run targets, Qt download location) are stored in a JSON settings file under XDG config (`~/.config/CPlusPlusQT6Skel/settings.json`) or `%APPDATA%\CPlusPlusQT6Skel\settings.json` on Windows. Manage them with `python dev_tool.py settings`.
+
 ```sh
 # Verify environment (compiler, cmake, generator, Qt) and get guidance to fix it
 python dev_tool.py verify
@@ -50,6 +52,10 @@ python dev_tool.py test -- -V
 
 # Check for newer Qt / PDCursesMod releases upstream
 python dev_tool.py check-updates
+
+# Configure defaults (build dir, Qt prefix, generator, run targets)
+python dev_tool.py settings --print        # show current values and config path
+python dev_tool.py settings --set build_dir=C:/dev/qt-build
 
 # Verify environment (compiler, cmake, generator, Qt) and get guidance to fix it
 python dev_tool.py verify

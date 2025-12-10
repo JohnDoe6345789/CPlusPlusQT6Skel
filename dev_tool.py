@@ -74,6 +74,115 @@ QML_EXCLUDE_DIRS = {".git", ".idea", ".vscode", "__pycache__", "build", "third_p
 DEFAULT_QT_CREATOR_OUTPUT_DIR = ROOT / "third_party" / "qtcreator"
 _VSWHERE_HINT_EMITTED = False
 
+# User settings (persisted in XDG config dir on POSIX or %APPDATA% on Windows).
+CONFIG_DIR_NAME = "CPlusPlusQT6Skel"
+CONFIG_FILE_NAME = "settings.json"
+DEFAULT_SETTINGS = {
+    "build_dir": str(DEFAULT_BUILD_DIR),
+    "build_type": DEFAULT_BUILD_TYPE,
+    "qt_prefix": None,
+    "generator": None,
+    "download_qt_output_dir": str(ROOT / "third_party" / "qt6"),
+    "download_qt_version": None,
+    "download_qt_compiler": None,
+    "default_run_targets": DEFAULT_RUN_TARGETS,
+}
+
+
+def _config_dir() -> Path:
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / CONFIG_DIR_NAME
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / CONFIG_DIR_NAME
+    return Path.home() / ".config" / CONFIG_DIR_NAME
+
+
+def _config_path() -> Path:
+    return _config_dir() / CONFIG_FILE_NAME
+
+
+def _load_settings_file() -> dict:
+    path = _config_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _normalized_setting(key: str, value: object) -> object:
+    if value is None:
+        return None
+    if key in {"build_dir", "qt_prefix", "download_qt_output_dir"}:
+        return str(Path(str(value)).expanduser())
+    if key == "default_run_targets":
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.replace(";", ",").split(",")]
+            return [p for p in parts if p]
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+        return DEFAULT_RUN_TARGETS
+    return str(value)
+
+
+def _merge_settings(user_values: dict) -> dict:
+    merged = DEFAULT_SETTINGS.copy()
+    for key, value in user_values.items():
+        if key not in DEFAULT_SETTINGS:
+            continue
+        merged[key] = _normalized_setting(key, value)
+    return merged
+
+
+def save_settings(settings: dict) -> None:
+    """Persist settings to disk and ensure parent dir exists."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sanitized = {
+        key: settings.get(key, DEFAULT_SETTINGS[key])
+        for key in DEFAULT_SETTINGS
+    }
+    path.write_text(json.dumps(sanitized, indent=2), encoding="utf-8")
+
+
+USER_SETTINGS = _merge_settings(_load_settings_file())
+
+
+def reload_settings() -> dict:
+    global USER_SETTINGS
+    USER_SETTINGS = _merge_settings(_load_settings_file())
+    return USER_SETTINGS
+
+
+def get_setting(key: str) -> object:
+    return USER_SETTINGS.get(key, DEFAULT_SETTINGS.get(key))
+
+
+def set_settings(updates: dict, *, unset: Iterable[str] = ()) -> dict:
+    current = dict(USER_SETTINGS)
+    for key in unset:
+        if key in DEFAULT_SETTINGS:
+            current[key] = DEFAULT_SETTINGS[key]
+    for key, value in updates.items():
+        if key not in DEFAULT_SETTINGS:
+            continue
+        current[key] = _normalized_setting(key, value)
+    USER_SETTINGS.update(current)
+    save_settings(USER_SETTINGS)
+    return USER_SETTINGS
+
+
+def default_run_targets() -> list[str]:
+    targets = get_setting("default_run_targets")
+    if isinstance(targets, list) and targets:
+        return [str(t) for t in targets]
+    return DEFAULT_RUN_TARGETS
+
 
 def run_command(cmd: Sequence[str], *, cwd: Optional[Path] = None) -> None:
     """Invoke a shell command and exit on failure."""
@@ -583,6 +692,35 @@ def download_qt_with_script(
     run_command(cmd)
 
 
+def apply_settings_to_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill in defaults from settings when CLI arguments are omitted."""
+    def _path_from_setting(key: str, fallback: Path) -> Path:
+        value = get_setting(key)
+        return Path(value) if value else fallback
+
+    if getattr(args, "build_dir", None) is None:
+        args.build_dir = _path_from_setting("build_dir", DEFAULT_BUILD_DIR)
+    if getattr(args, "build_type", None) is None:
+        args.build_type = str(get_setting("build_type") or DEFAULT_BUILD_TYPE)
+    if getattr(args, "qt_prefix", None) is None:
+        args.qt_prefix = get_setting("qt_prefix")
+    if getattr(args, "generator", None) is None:
+        args.generator = get_setting("generator")
+    if getattr(args, "download_qt_output_dir", None) is None:
+        args.download_qt_output_dir = _path_from_setting("download_qt_output_dir", ROOT / "third_party" / "qt6")
+    if hasattr(args, "output_dir") and getattr(args, "output_dir", None) is None:
+        args.output_dir = args.download_qt_output_dir
+    if getattr(args, "download_qt_version", None) is None:
+        args.download_qt_version = get_setting("download_qt_version")
+    if hasattr(args, "qt_version") and getattr(args, "qt_version", None) is None:
+        args.qt_version = args.download_qt_version
+    if getattr(args, "download_qt_compiler", None) is None:
+        args.download_qt_compiler = get_setting("download_qt_compiler")
+    if hasattr(args, "compiler") and getattr(args, "compiler", None) is None:
+        args.compiler = args.download_qt_compiler
+    return args
+
+
 def ensure_qt_prefix(
     *,
     args: argparse.Namespace,
@@ -981,7 +1119,7 @@ def list_runnable_targets(
     # Deduplicate while preserving order.
     seen = set()
     cleaned: list[str] = []
-    for name in found + DEFAULT_RUN_TARGETS:
+    for name in found + default_run_targets():
         if name in NON_RUN_TARGETS or name in seen:
             continue
         seen.add(name)
@@ -1397,6 +1535,42 @@ def prompt_yes_no(question: str, *, default: bool = True) -> bool:
         print("Please enter y or n.")
 
 
+def _print_settings(settings: dict) -> None:
+    print("Settings file:", _config_path())
+    for key in sorted(DEFAULT_SETTINGS.keys()):
+        print(f"  {key}: {settings.get(key)!r}")
+
+
+def _parse_setting_arg(arg: str) -> tuple[str, str]:
+    if "=" not in arg:
+        raise ValueError("Must be KEY=VALUE")
+    key, value = arg.split("=", 1)
+    return key.strip(), value.strip()
+
+
+def edit_settings_interactive(settings: dict) -> dict:
+    """Simple prompt-driven editor."""
+    if not sys.stdin.isatty():
+        print("Interactive edit requires a TTY. Use --set KEY=VALUE instead.")
+        return settings
+
+    print("Press Enter to keep the current value. Type 'none' to clear optional values.")
+    updates: dict = {}
+    for key in DEFAULT_SETTINGS:
+        current = settings.get(key)
+        prompt = f"{key} [{current!r}]: "
+        new_value = input(prompt).strip()
+        if not new_value:
+            continue
+        if new_value.lower() in {"none", "null"}:
+            updates[key] = None
+        else:
+            updates[key] = new_value
+    if updates:
+        return set_settings(updates)
+    return settings
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
 
@@ -1404,13 +1578,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument(
             "--build-dir",
             type=Path,
-            default=DEFAULT_BUILD_DIR,
-            help="Build directory (default: ./build)",
+            default=None,
+            help="Build directory (default: settings file or ./build)",
         )
         p.add_argument(
             "--build-type",
-            default=DEFAULT_BUILD_TYPE,
-            help="CMAKE_BUILD_TYPE for single-config generators (default: Debug)",
+            default=None,
+            help="CMAKE_BUILD_TYPE for single-config generators (default: from settings or Debug)",
         )
         p.add_argument("--config", help="--config value for multi-config generators")
         p.add_argument("--qt-prefix", help="Path to Qt installation root")
@@ -1431,8 +1605,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument(
             "--download-qt-output-dir",
             type=Path,
-            default=ROOT / "third_party" / "qt6",
-            help="Where to place auto-downloaded Qt (default: third_party/qt6).",
+            default=None,
+            help="Where to place auto-downloaded Qt (default: settings file or third_party/qt6).",
         )
 
     add_common_arguments(parser)
@@ -1509,8 +1683,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     download_parser.add_argument(
         "--output-dir",
         type=Path,
-        default=ROOT / "third_party" / "qt6",
-        help="Destination directory (default: third_party/qt6)",
+        default=None,
+        help="Destination directory (default: settings file or third_party/qt6)",
     )
     download_parser.add_argument(
         "--base-url",
@@ -1555,6 +1729,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Install location for auto-downloaded Qt Creator (default: third_party/qtcreator).",
     )
 
+    settings_parser = subparsers.add_parser(
+        "settings",
+        help="View or edit persisted defaults",
+    )
+    settings_parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=f"Update a setting (valid keys: {', '.join(DEFAULT_SETTINGS.keys())})",
+    )
+    settings_parser.add_argument(
+        "--unset",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="Reset a setting back to its built-in default",
+    )
+    settings_parser.add_argument(
+        "--print",
+        action="store_true",
+        help="Print the current settings and exit",
+    )
+
     menu_parser = subparsers.add_parser(
         "menu",
         help="Interactive mode to build, test, or run targets",
@@ -1575,6 +1773,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.target = getattr(args, "target", None)
         args.program_args = getattr(args, "program_args", [])
         args.skip_build = getattr(args, "skip_build", False)
+
+    args = apply_settings_to_args(args)
+
+    if args.command == "settings":
+        current = dict(USER_SETTINGS)
+        try:
+            set_pairs = dict(_parse_setting_arg(item) for item in args.set)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+
+        updated = current
+        if set_pairs or args.unset:
+            updated = set_settings(set_pairs, unset=args.unset)
+            print("Updated settings.")
+        if args.print or set_pairs or args.unset:
+            _print_settings(updated)
+            return 0
+        # No set/unset: enter interactive editor.
+        new_settings = edit_settings_interactive(updated)
+        _print_settings(new_settings)
+        return 0
 
     if args.command == "download-qt":
         compiler_arg = args.compiler
@@ -1669,7 +1888,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "menu":
         # Choose high-level action.
-        actions = ["verify", "build", "test", "run", "open-qml", "check-updates", "quit"]
+        actions = ["verify", "build", "test", "run", "open-qml", "check-updates", "settings", "quit"]
         choice = prompt_for_choice(actions, prompt="Select action")
         if choice == "verify":
             ok = verify_environment(args.qt_prefix, generator, build_dir)
@@ -1727,6 +1946,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if choice == "check-updates":
             check_library_updates(args.qt_prefix)
+            return 0
+        if choice == "settings":
+            new_settings = edit_settings_interactive(USER_SETTINGS)
+            _print_settings(new_settings)
             return 0
         return 0
 
