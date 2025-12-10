@@ -31,6 +31,31 @@ third_party/qt6/
   6.7.2/Src/...   # only if --with-src
 ```
 
+## Cross-platform build helper
+
+`dev_tool.py` wraps common CMake actions for Windows, macOS, and Linux. It auto-picks Ninja if present (otherwise defers to CMake's default), reconfigures on each call, and tries to find Qt under `third_party/qt6` (or honors `QT_PREFIX_PATH` / `--qt-prefix`).
+
+```sh
+# Build everything into ./build (Debug by default)
+python dev_tool.py build
+
+# Build and run the console renderer (skips rebuild on request; omit target to choose from detected targets)
+python dev_tool.py run sample_cli --skip-build -- --help
+
+# Build and run the test suite (passes args to ctest)
+python dev_tool.py test -- -V
+
+# Verify environment (cmake, generator, Qt) and get guidance to fix it
+python dev_tool.py verify
+
+# Interactive menu to build / test / run (default if no args and in a TTY)
+python dev_tool.py menu
+# or simply:
+python dev_tool.py
+
+When running without a target, the tool tries to list runnable CMake targets from the current build directory (Ninja targets or `cmake --build --target help`) and falls back to the sample app/CLI defaults.
+```
+
 ## Sample Qt Quick app + tests
 
 This repo now contains a minimal Qt 6 + QML app (`sample_app`) plus a small test suite.
