@@ -11,6 +11,7 @@ Typical usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -130,6 +131,47 @@ def _maybe_warn_missing_vswhere() -> None:
     print(_vswhere_install_help())
 
 
+def _vswhere_info() -> Optional[tuple[Optional[str], Optional[str]]]:
+    """
+    Return (installationPath, installationVersion) for the latest Visual Studio.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+
+    vswhere = _vswhere_path()
+    if not vswhere:
+        _maybe_warn_missing_vswhere()
+        return None
+
+    cmd = [
+        str(vswhere),
+        "-latest",
+        "-products",
+        "*",
+        "-requires",
+        "Microsoft.Component.MSBuild",
+        "-format",
+        "json",
+    ]
+    try:
+        output = subprocess.check_output(cmd, text=True, encoding="utf-8").strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+
+    if not data or not isinstance(data, list):
+        return None
+
+    entry = data[0] or {}
+    install_path = entry.get("installationPath")
+    install_version = entry.get("installationVersion")
+    return install_path, install_version
+
+
 def _has_visual_studio_install() -> bool:
     """
     Detect a Visual Studio toolchain even when cl.exe is not on PATH.
@@ -158,6 +200,33 @@ def _has_visual_studio_install() -> bool:
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
     return bool(output)
+
+
+def _detect_visual_studio_generator() -> Optional[str]:
+    """
+    Return a Visual Studio generator string (e.g., "Visual Studio 17 2022")
+    based on the latest installed toolset reported by vswhere.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+
+    info = _vswhere_info()
+    if not info:
+        return None
+    _, version = info
+    if not version:
+        return None
+
+    try:
+        major = int(str(version).split(".", 1)[0])
+    except ValueError:
+        return None
+
+    if major >= 17:
+        return "Visual Studio 17 2022"
+    if major == 16:
+        return "Visual Studio 16 2019"
+    return None
 
 
 def detect_compiler_flavor(generator: Optional[str]) -> Optional[str]:
@@ -193,9 +262,174 @@ def detect_compiler_flavor(generator: Optional[str]) -> Optional[str]:
     if cl_path:
         return "msvc"
     gxx_path = shutil.which("g++")
-    if gxx_path and "mingw" in gxx_path.lower():
+    if gxx_path:
         return "mingw"
     return None
+
+
+def compiler_install_hint() -> str:
+    if sys.platform == "darwin":
+        return "Install the Xcode Command Line Tools: xcode-select --install"
+    mgr = detect_package_manager()
+    if mgr == "apt":
+        return "sudo apt-get install build-essential"
+    if mgr == "dnf":
+        return "sudo dnf install gcc-c++"
+    if mgr == "brew":
+        return "brew install llvm"
+    if mgr == "choco":
+        return "Install Visual Studio Build Tools 2022 (Desktop C++ workload) or MinGW-w64."
+    return "Install a C++ compiler (clang++/g++) and ensure it is on PATH."
+
+
+def _compiler_search_dirs(compiler: str) -> list[Path]:
+    """Best-effort search dirs via `<compiler> -print-search-dirs` (gcc/clang style)."""
+    try:
+        output = subprocess.check_output(
+            [compiler, "-print-search-dirs"], text=True, encoding="utf-8"
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return []
+    for line in output.splitlines():
+        if line.lower().startswith("libraries:"):
+            _, _, path_list = line.partition("=")
+            return [
+                Path(p).resolve()
+                for p in path_list.strip().split(os.pathsep)
+                if p.strip()
+            ]
+    return []
+
+
+def _unique_existing_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        result.append(resolved)
+    return result
+
+
+def _msvc_library_dirs_from_root(root: Path) -> list[Path]:
+    """Collect likely MSVC library directories from a VS install or tool root."""
+    candidates: list[Path] = []
+    vc_tools = root / "VC" / "Tools" / "MSVC"
+    if vc_tools.exists():
+        versions = sorted(vc_tools.iterdir(), key=lambda p: p.name)
+        if versions:
+            newest = versions[-1]
+            for sub in (newest / "lib", newest / "lib" / "x64", newest / "lib" / "x86"):
+                candidates.append(sub)
+    # Walk up from possible cl.exe location
+    for parent in root.parents:
+        lib_dir = parent / "lib"
+        candidates.append(lib_dir)
+        candidates.append(lib_dir / "x64")
+        candidates.append(lib_dir / "x86")
+    return _unique_existing_paths(candidates)
+
+
+def _compiler_library_dirs(compiler_path: Optional[str]) -> list[Path]:
+    """Return likely library directories for the given compiler path."""
+    if not compiler_path:
+        return []
+    compiler_path = str(compiler_path)
+    libs = _compiler_search_dirs(compiler_path)
+    if libs:
+        return _unique_existing_paths(libs)
+    path_obj = Path(compiler_path).resolve()
+    candidates = [
+        path_obj.parent / "lib",
+        path_obj.parent.parent / "lib",
+        path_obj.parent.parent / "lib64",
+    ]
+    return _unique_existing_paths(candidates)
+
+
+def detect_compiler(
+    generator: Optional[str],
+) -> tuple[Optional[str], Optional[str], list[Path]]:
+    """
+    Locate a usable C++ compiler. Returns (description, hint/warning).
+    The hint is non-empty when the compiler is missing or needs setup.
+    """
+    for env_var in ("CXX", "CC"):
+        compiler = os.environ.get(env_var)
+        if not compiler:
+            continue
+        resolved = shutil.which(compiler) or (
+            str(Path(compiler)) if Path(compiler).exists() else None
+        )
+        if resolved:
+            return f"{resolved} (from ${env_var})", None, _compiler_library_dirs(resolved)
+        return None, f"${env_var} points to {compiler}, but it is not executable.", []
+
+    if sys.platform.startswith("win"):
+        flavor_hint = detect_compiler_flavor(generator)
+        gxx_path = shutil.which("g++")
+        cl_path = shutil.which("cl")
+        vs_path = os.environ.get("VSINSTALLDIR") or os.environ.get("VCINSTALLDIR")
+        vs_info = _vswhere_info()
+        if vs_info:
+            vs_path = vs_path or vs_info[0]
+            vs_version = vs_info[1]
+        else:
+            vs_version = None
+
+        def _msvc_result() -> tuple[Optional[str], Optional[str]]:
+            if cl_path:
+                return f"cl.exe at {cl_path}", None
+            if vs_path:
+                version_label = ""
+                if vs_version:
+                    major = vs_version.split(".", 1)[0]
+                    version_label = f" (VS {major})"
+                return (
+                    f"MSVC{version_label} at {vs_path}",
+                    "MSVC found but cl.exe is not on PATH. Open an \"x64 Native Tools Command Prompt for VS\" (or run VsDevCmd.bat/vcvarsall.bat) so the compiler environment is initialized.",
+                )
+            if _has_visual_studio_install():
+                return (
+                    "MSVC detected (path unknown)",
+                    "MSVC found but cl.exe is not on PATH. Open an \"x64 Native Tools Command Prompt for VS\" (or run VsDevCmd.bat/vcvarsall.bat) so the compiler environment is initialized.",
+                )
+            return None, None
+
+        def _mingw_result() -> tuple[Optional[str], Optional[str]]:
+            if gxx_path:
+                label = "MinGW g++" if "mingw" in gxx_path.lower() else "g++"
+                return f"{label} at {gxx_path}", None
+            return None, None
+
+        if flavor_hint == "msvc":
+            desc, note = _msvc_result()
+            if desc:
+                libs = _msvc_library_dirs_from_root(Path(cl_path).resolve()) if cl_path else _msvc_library_dirs_from_root(Path(vs_path)) if vs_path else []
+                return desc, note, libs
+        if flavor_hint == "mingw":
+            desc, note = _mingw_result()
+            if desc:
+                return desc, note, _compiler_library_dirs(gxx_path)
+
+        desc, note = _msvc_result()
+        if desc:
+            libs = _msvc_library_dirs_from_root(Path(cl_path).resolve()) if cl_path else _msvc_library_dirs_from_root(Path(vs_path)) if vs_path else []
+            return desc, note, libs
+        desc, note = _mingw_result()
+        if desc:
+            return desc, note, _compiler_library_dirs(gxx_path)
+
+        return None, "Install MSVC Build Tools or MinGW-w64 and ensure cl.exe/g++.exe is available.", []
+
+    for candidate in ("c++", "g++", "clang++"):
+        path = shutil.which(candidate)
+        if path:
+            return f"{candidate} at {path}", None, _compiler_library_dirs(path)
+
+    return None, compiler_install_hint(), []
 
 
 def enforce_qt_toolchain_match(qt_prefix: Optional[Path], generator: Optional[str]) -> None:
@@ -330,11 +564,39 @@ def resolve_qt_prefix(cli_value: Optional[str], generator: Optional[str] = None)
     return autodetect_qt_prefix(preferred_flavor)
 
 
+def qt_library_dirs(prefix: Path) -> list[Path]:
+    """Return candidate Qt library directories under the given prefix."""
+    dirs: list[Path] = []
+    for name in ("lib", "lib64", "Lib"):
+        candidate = prefix / name
+        if candidate.exists():
+            dirs.append(candidate)
+    return dirs
+
+
+def find_pdcurses_paths(build_dir: Path) -> list[Path]:
+    """List PDCursesMod locations: vendored source plus any built library dirs."""
+    paths: list[Path] = []
+    vendored = ROOT / "third_party" / "PDCursesMod"
+    if vendored.exists():
+        paths.append(vendored)
+
+    if build_dir.exists():
+        for ext in ("*.lib", "*.a", "*.so", "*.dylib", "*.dll"):
+            for file in build_dir.rglob(ext):
+                if "pdcurses" in file.name.lower():
+                    parent = file.parent.resolve()
+                    if parent not in paths:
+                        paths.append(parent)
+    return paths
+
+
 def detect_generator(cli_value: Optional[str]) -> Optional[str]:
     """
     Pick a sensible default generator:
     - CLI value wins
     - $CMAKE_GENERATOR if set
+    - On Windows, prefer a Visual Studio generator (works without env setup)
     - Ninja if available
     - otherwise let CMake decide
     """
@@ -342,6 +604,10 @@ def detect_generator(cli_value: Optional[str]) -> Optional[str]:
         return cli_value
     if os.environ.get("CMAKE_GENERATOR"):
         return os.environ["CMAKE_GENERATOR"]
+    if sys.platform.startswith("win"):
+        vs_generator = _detect_visual_studio_generator()
+        if vs_generator:
+            return vs_generator
     if shutil.which("ninja"):
         return "Ninja"
     return None
@@ -559,10 +825,10 @@ def package_install_hint(tool: str) -> str:
 
 
 def verify_environment(
-    qt_prefix: Optional[Path], generator: Optional[str]
+    qt_prefix: Optional[Path], generator: Optional[str], build_dir: Path
 ) -> bool:
     """
-    Check common requirements (cmake, generator availability, Qt prefix).
+    Check common requirements (compiler, cmake, generator availability, Qt prefix).
     Returns True when everything looks ok, False otherwise.
     """
     print("\nEnvironment verification:")
@@ -587,10 +853,28 @@ def verify_environment(
             f"e.g. \"{ninja_hint}\" or set CMAKE_GENERATOR/--generator."
         )
 
+    compiler_desc, compiler_hint, compiler_libs = detect_compiler(detected_gen)
+    if compiler_desc:
+        print(f" - compiler: {compiler_desc}")
+        if compiler_hint:
+            print(f"   note: {compiler_hint}")
+        if compiler_libs:
+            print(f" - compiler libs: {', '.join(str(p) for p in compiler_libs)}")
+    else:
+        ok = False
+        hint = compiler_hint or compiler_install_hint()
+        print(f" - compiler: MISSING. {hint}")
+
     resolved_qt = resolve_qt_prefix(str(qt_prefix) if qt_prefix else None, detected_gen)
     compiler_flavor = detect_compiler_flavor(detected_gen)
     if resolved_qt:
         print(f" - Qt prefix: {resolved_qt}")
+        libs = qt_library_dirs(resolved_qt)
+        if libs:
+            print(f" - Qt libs: {', '.join(str(p) for p in libs)}")
+        else:
+            ok = False
+            print(" - Qt libs: not found under prefix (expected lib/lib64).")
         qt_flavor = detect_qt_flavor(resolved_qt)
         if compiler_flavor and qt_flavor and compiler_flavor != qt_flavor:
             ok = False
@@ -607,6 +891,12 @@ def verify_environment(
             f"or fetch Qt with \"{HELP_URLS['download_script']}\" "
             f"(binaries: {HELP_URLS['qt']}; package manager e.g. \"{qt_hint}\")."
         )
+
+    pdcurses_paths = find_pdcurses_paths(build_dir)
+    if pdcurses_paths:
+        print(f" - PDCursesMod: {', '.join(str(p) for p in pdcurses_paths)}")
+    else:
+        print(" - PDCursesMod: not found (expected under third_party/PDCursesMod or build outputs).")
 
     return ok
 
@@ -847,7 +1137,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     verify_parser = subparsers.add_parser(
         "verify",
-        help="Check environment (cmake, generator, Qt prefix) and suggest fixes",
+        help="Check environment (compiler, cmake, generator, Qt prefix) and suggest fixes",
     )
     add_common_arguments(verify_parser)
 
@@ -933,7 +1223,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.command == "verify":
-        ok = verify_environment(qt_prefix, generator)
+        ok = verify_environment(qt_prefix, generator, build_dir)
         return 0 if ok else 1
 
     if args.command == "build":
@@ -975,7 +1265,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         actions = ["verify", "build", "test", "run", "open-qml", "quit"]
         choice = prompt_for_choice(actions, prompt="Select action")
         if choice == "verify":
-            ok = verify_environment(args.qt_prefix, generator)
+            ok = verify_environment(args.qt_prefix, generator, build_dir)
             return 0 if ok else 1
         if choice == "build":
             enforce_qt_toolchain_match(qt_prefix, generator)

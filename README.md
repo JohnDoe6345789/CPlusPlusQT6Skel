@@ -36,7 +36,7 @@ third_party/qt6/
 `dev_tool.py` wraps common CMake actions for Windows, macOS, and Linux. It auto-picks Ninja if present (otherwise defers to CMake's default), reconfigures on each call, and tries to find Qt under `third_party/qt6` (or honors `QT_PREFIX_PATH` / `--qt-prefix`).
 
 ```sh
-# Verify environment (cmake, generator, Qt) and get guidance to fix it
+# Verify environment (compiler, cmake, generator, Qt) and get guidance to fix it
 python dev_tool.py verify
 
 # Build everything into ./build (Debug by default)
@@ -48,7 +48,7 @@ python dev_tool.py run sample_cli --skip-build -- --help
 # Build and run the test suite (passes args to ctest)
 python dev_tool.py test -- -V
 
-# Verify environment (cmake, generator, Qt) and get guidance to fix it
+# Verify environment (compiler, cmake, generator, Qt) and get guidance to fix it
 python dev_tool.py verify
 
 # Interactive menu to build / test / run (default if no args and in a TTY)
