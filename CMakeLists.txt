@@ -63,6 +63,19 @@ add_library(sample_support STATIC
 target_include_directories(sample_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sample_support PRIVATE Qt6::Qml)
 
+if(TARGET PDCursesMod::pdcurses)
+    add_library(qml_curses STATIC
+        src/qml_curses_frontend.cpp
+        src/qml_curses_frontend.h
+        src/qml_parser.cpp
+        src/qml_parser.h
+    )
+    target_include_directories(qml_curses PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(qml_curses PUBLIC PDCursesMod::pdcurses)
+else()
+    message(WARNING "PDCursesMod target is unavailable; skipping qml_curses frontend build.")
+endif()
+
 qt_add_resources(sample_support "qml_resources"
     PREFIX "/qml"
     FILES
@@ -89,3 +102,12 @@ add_executable(qml_view_tests
 target_link_libraries(qml_view_tests PRIVATE sample_support Qt6::Test Qt6::Quick Qt6::QuickControls2 Qt6::Qml)
 qt_import_qml_plugins(qml_view_tests)
 add_test(NAME qml_view_tests COMMAND qml_view_tests)
+
+if(TARGET qml_curses)
+    add_executable(qml_curses_tests
+        tests/qml_curses_frontend_test.cpp
+        tests/qml_parser_test.cpp
+    )
+    target_link_libraries(qml_curses_tests PRIVATE qml_curses Qt6::Test)
+    add_test(NAME qml_curses_tests COMMAND qml_curses_tests)
+endif()

@@ -60,3 +60,35 @@ Link it to your target, for example:
 ```cmake
 target_link_libraries(your_target PRIVATE PDCursesMod::pdcurses)
 ```
+
+## QML to PDCurses prototype
+
+`qml_curses` provides a tiny QML parser plus a PDCursesMod renderer for column-based layouts. It understands basic `ApplicationWindow` + `Column` trees with `Text`, `TextField`, `Label`, and `Button` children and centers them in the console. The target is only built when the vendored `PDCursesMod::pdcurses` library is available.
+
+Example usage:
+```cpp
+#include "qml_curses_frontend.h"
+#include "qml_parser.h"
+#include <curses.h>
+
+int main() {
+    initscr();
+    noecho();
+
+    QmlParser parser;
+    QmlDocument doc = parser.parseFile("qml/Main.qml");
+
+    PdcursesScreen screen;  // wraps stdscr
+    QmlCursesFrontend frontend(screen, [](const std::string &binding) {
+        if (binding == "greeter.message") return std::string("Hello from C++");
+        return binding;
+    });
+    frontend.render(doc);
+
+    getch();
+    endwin();
+    return 0;
+}
+```
+
+The `qml_curses_tests` target exercises the parser and renderer without requiring a live console by mocking the curses screen.
