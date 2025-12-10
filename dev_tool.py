@@ -17,6 +17,8 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -88,6 +90,109 @@ def parse_version_from_path(path: Path) -> Tuple[int, ...]:
         if match:
             return tuple(int(x) for x in match.groups())
     return tuple()
+
+
+def parse_version_string(value: str) -> tuple[int, ...]:
+    """Extract numeric components from a version-like string."""
+    parts = [int(x) for x in re.findall(r"\d+", value)]
+    return tuple(parts)
+
+
+def compare_versions(lhs: Optional[str], rhs: Optional[str]) -> Optional[int]:
+    """Return -1/0/1 if lhs is older/equal/newer than rhs; None when unknown."""
+    if not lhs or not rhs:
+        return None
+    left = parse_version_string(lhs)
+    right = parse_version_string(rhs)
+    if not left or not right:
+        return None
+    return (left > right) - (left < right)
+
+
+def _latest_version_string(versions: Iterable[str]) -> Optional[str]:
+    """Pick the highest semantic-ish version from a sequence of strings."""
+    cleaned = []
+    for version in versions:
+        tupled = parse_version_string(version)
+        if not tupled:
+            continue
+        cleaned.append(version.rstrip("/"))
+    if not cleaned:
+        return None
+    return max(cleaned, key=lambda v: parse_version_string(v))
+
+
+def _fetch_url(url: str, *, timeout: float = 10.0) -> tuple[Optional[str], Optional[str]]:
+    """Fetch text content from a URL, returning (body, error)."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            return resp.read().decode(charset, errors="ignore"), None
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        return None, str(exc)
+
+
+def _extract_versions_from_listing(html: str, *, segments: Optional[int] = None) -> list[str]:
+    """Collect version strings like 6.7.2 from a simple directory listing."""
+    matches = re.findall(r'href="((?:\d+\.)+\d+)/"', html)
+    versions: list[str] = []
+    for match in matches:
+        tupled = parse_version_string(match)
+        if segments and len(tupled) != segments:
+            continue
+        versions.append(match.rstrip("/"))
+    return versions
+
+
+def fetch_latest_qt_version() -> tuple[Optional[str], str, Optional[str]]:
+    """Return (version, source_url, error) for the newest Qt 6 release."""
+    base_url = "https://download.qt.io/official_releases/qt/"
+    listing, error = _fetch_url(base_url)
+    if not listing:
+        return None, base_url, error
+
+    major_minor = [
+        version
+        for version in _extract_versions_from_listing(listing, segments=2)
+        if version.startswith("6.")
+    ]
+    newest_major_minor = _latest_version_string(major_minor)
+    if not newest_major_minor:
+        return None, base_url, "No Qt 6 versions found in the release index."
+
+    patch_listing, patch_error = _fetch_url(f"{base_url}{newest_major_minor}/")
+    if patch_listing:
+        patch_versions = [
+            version
+            for version in _extract_versions_from_listing(patch_listing, segments=3)
+            if version.startswith(newest_major_minor)
+        ]
+        newest_patch = _latest_version_string(patch_versions)
+        if newest_patch:
+            return newest_patch, f"{base_url}{newest_major_minor}/", None
+
+    return newest_major_minor, base_url, patch_error
+
+
+def fetch_latest_pdcurses_version() -> tuple[Optional[str], str, Optional[str]]:
+    """Return (version, source_url, error) for the latest PDCursesMod release."""
+    api_url = "https://api.github.com/repos/Bill-Gray/PDCursesMod/releases/latest"
+    payload, error = _fetch_url(api_url)
+    if not payload:
+        return None, api_url, error
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return None, api_url, f"Failed to parse GitHub response: {exc}"
+
+    tag = data.get("tag_name") or data.get("name")
+    version = None
+    if isinstance(tag, str):
+        version = tag.lstrip("vV")
+    html_url = data.get("html_url") or api_url
+    if not version:
+        return None, html_url, "Latest release tag not present in GitHub response."
+    return version, html_url, None
 
 
 def detect_qt_flavor(path: Path) -> Optional[str]:
@@ -591,6 +696,36 @@ def find_pdcurses_paths(build_dir: Path) -> list[Path]:
     return paths
 
 
+def detect_local_qt_version(qt_prefix_value: Optional[str]) -> tuple[Optional[str], Optional[Path]]:
+    """Return (version, prefix) for the local Qt install if found."""
+    prefix = resolve_qt_prefix(str(qt_prefix_value) if qt_prefix_value else None)
+    if not prefix:
+        return None, None
+    version_tuple = parse_version_from_path(prefix)
+    version = ".".join(str(part) for part in version_tuple) if version_tuple else None
+    return version, prefix
+
+
+def detect_local_pdcurses_version() -> Optional[str]:
+    """Read the PDCursesMod version macros from the vendored header."""
+    header = ROOT / "third_party" / "PDCursesMod" / "curses.h"
+    if not header.exists():
+        return None
+
+    text = header.read_text(encoding="utf-8", errors="ignore")
+
+    def _macro_value(name: str) -> Optional[str]:
+        match = re.search(rf"{name}\s+(\d+)", text)
+        return match.group(1) if match else None
+
+    major = _macro_value("PDC_VER_MAJOR")
+    minor = _macro_value("PDC_VER_MINOR")
+    patch = _macro_value("PDC_VER_CHANGE")
+    if not all((major, minor, patch)):
+        return None
+    return f"{major}.{minor}.{patch}"
+
+
 def detect_generator(cli_value: Optional[str]) -> Optional[str]:
     """
     Pick a sensible default generator:
@@ -963,6 +1098,63 @@ def verify_environment(
     return ok
 
 
+def check_library_updates(qt_prefix_value: Optional[str]) -> bool:
+    """
+    Check vendored/installed library versions against upstream releases.
+    Returns True when all look queryable (even if updates are available).
+    """
+    print("\nChecking library updates (Qt 6, PDCursesMod):")
+    ok = True
+
+    local_qt_version, qt_prefix = detect_local_qt_version(qt_prefix_value)
+    latest_qt_version, qt_source, qt_error = fetch_latest_qt_version()
+    if qt_prefix:
+        version_label = local_qt_version or "unknown version"
+        print(f" - Qt local: {version_label} at {qt_prefix}")
+    else:
+        print(" - Qt local: not detected (set --qt-prefix / QT_PREFIX_PATH / CMAKE_PREFIX_PATH).")
+    if latest_qt_version:
+        comparison = compare_versions(local_qt_version, latest_qt_version)
+        status = ""
+        if comparison is not None:
+            if comparison < 0:
+                status = " (update available)"
+            elif comparison == 0:
+                status = " (up to date)"
+        print(f" - Qt latest: {latest_qt_version} [{qt_source}]{status}")
+        if comparison is not None and comparison < 0:
+            print(
+                f"   hint: run {HELP_URLS['download_script']} --qt-version {latest_qt_version} "
+                "to refresh third_party/qt6."
+            )
+    else:
+        ok = False
+        print(f" - Qt latest: unavailable ({qt_error or 'unknown error'})")
+
+    local_pdc_version = detect_local_pdcurses_version()
+    latest_pdc_version, pdc_source, pdc_error = fetch_latest_pdcurses_version()
+    if local_pdc_version:
+        print(f" - PDCursesMod local: {local_pdc_version} (third_party/PDCursesMod)")
+    else:
+        print(" - PDCursesMod local: not found under third_party/PDCursesMod.")
+    if latest_pdc_version:
+        comparison = compare_versions(local_pdc_version, latest_pdc_version)
+        status = ""
+        if comparison is not None:
+            if comparison < 0:
+                status = " (update available)"
+            elif comparison == 0:
+                status = " (up to date)"
+        print(f" - PDCursesMod latest: {latest_pdc_version} [{pdc_source}]{status}")
+        if comparison is not None and comparison < 0:
+            print("   hint: update the vendored PDCursesMod tree from the upstream release/tag.")
+    else:
+        ok = False
+        print(f" - PDCursesMod latest: unavailable ({pdc_error or 'unknown error'})")
+
+    return ok
+
+
 def find_qml_files(root: Path) -> list[Path]:
     """
     Locate QML files under the project while skipping generated/vendor trees.
@@ -1203,6 +1395,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     add_common_arguments(verify_parser)
 
+    updates_parser = subparsers.add_parser(
+        "check-updates",
+        help="Check Qt and vendored libraries for newer upstream releases",
+    )
+    add_common_arguments(updates_parser)
+
     download_parser = subparsers.add_parser(
         "download-qt",
         help="Fetch Qt using the bundled download_qt6.py helper",
@@ -1285,6 +1483,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         open_qml_in_qt_creator(qml_path)
         return 0
 
+    if args.command == "check-updates":
+        ok = check_library_updates(getattr(args, "qt_prefix", None))
+        return 0 if ok else 1
+
     if args.command == "verify":
         ok = verify_environment(qt_prefix, generator, build_dir)
         return 0 if ok else 1
@@ -1343,7 +1545,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "menu":
         # Choose high-level action.
-        actions = ["verify", "build", "test", "run", "open-qml", "quit"]
+        actions = ["verify", "build", "test", "run", "open-qml", "check-updates", "quit"]
         choice = prompt_for_choice(actions, prompt="Select action")
         if choice == "verify":
             ok = verify_environment(args.qt_prefix, generator, build_dir)
@@ -1398,6 +1600,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if choice == "open-qml":
             qml_path = choose_qml_file(None)
             open_qml_in_qt_creator(qml_path)
+            return 0
+        if choice == "check-updates":
+            check_library_updates(args.qt_prefix)
             return 0
         return 0
 

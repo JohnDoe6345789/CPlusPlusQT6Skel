@@ -48,6 +48,9 @@ python dev_tool.py run sample_cli --skip-build -- --help
 # Build and run the test suite (passes args to ctest)
 python dev_tool.py test -- -V
 
+# Check for newer Qt / PDCursesMod releases upstream
+python dev_tool.py check-updates
+
 # Verify environment (compiler, cmake, generator, Qt) and get guidance to fix it
 python dev_tool.py verify
 
