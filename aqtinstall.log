@@ -214,3 +214,13 @@
 2025-12-10 10:21:13,033 - aqt.updater - INFO - updater 32824 Patching third_party\qt6\6.10.1\msvc2022_64\lib\Qt6Xmld.prl
 2025-12-10 10:21:13,040 - aqt.main - INFO - installer 32824 Finished installation
 2025-12-10 10:21:13,040 - aqt.main - INFO - installer 32824 Time elapsed: 58.30023170 second
+2025-12-10 13:38:16,330 - aqt.main - INFO - installer 28128 aqtinstall(aqt) v3.3.0 on Python 3.12.10 [CPython MSC v.1943 64 bit (AMD64)]
+2025-12-10 13:38:16,332 - aqt.helper - DEBUG - helper 28128 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qtcreator/Updates.xml.sha256
+2025-12-10 13:38:17,089 - aqt.helper - DEBUG - helper 28128 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qtcreator/Updates.xml.sha256
+2025-12-10 13:38:17,689 - aqt.helper - DEBUG - helper 28128 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qtcreator/Updates.xml.sha256
+2025-12-10 13:38:18,289 - aqt.helper - DEBUG - helper 28128 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qtcreator/Updates.xml.sha256
+2025-12-10 13:38:18,889 - aqt.helper - DEBUG - helper 28128 Attempt to download checksum at https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qtcreator/Updates.xml.sha256
+2025-12-10 13:38:19,488 - aqt.archives - WARNING - archives 28128 Failed to download checksum for the file 'online/qtsdkrepository/windows_x86/desktop/qtcreator/Updates.xml'. This may happen on unofficial mirrors.
+2025-12-10 13:38:20,108 - aqt.main - ERROR - installer 28128 Failed to locate XML data for the tool 'qtcreator'.
+==============================Suggested follow-up:==============================
+* Please use 'aqt list-tool windows desktop' to show tools available.
