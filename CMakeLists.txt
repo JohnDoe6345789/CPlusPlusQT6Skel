@@ -5,7 +5,7 @@ project(CPlusPlusQT6Skel VERSION 0.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Qml Test)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Quick QuickControls2 Qml Test)
 
 qt_standard_project_setup()
 
@@ -56,6 +56,16 @@ elseif(BUILD_PDCURSES_WINCON)
     message(WARNING "PDCursesMod sources not found or unsupported platform; skipping WinCon build.")
 endif()
 
+set(CURSES_BACKEND_TARGET "")
+if(TARGET PDCursesMod::pdcurses)
+    set(CURSES_BACKEND_TARGET PDCursesMod::pdcurses)
+elseif(NOT WIN32)
+    find_package(Curses)
+    if(CURSES_FOUND)
+        set(CURSES_BACKEND_TARGET Curses::Curses)
+    endif()
+endif()
+
 add_library(sample_support STATIC
     src/greeter.cpp
     src/greeter.h
@@ -63,7 +73,7 @@ add_library(sample_support STATIC
 target_include_directories(sample_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(sample_support PRIVATE Qt6::Qml)
 
-if(TARGET PDCursesMod::pdcurses)
+if(CURSES_BACKEND_TARGET)
     add_library(qml_curses STATIC
         src/qml_curses_frontend.cpp
         src/qml_curses_frontend.h
@@ -71,9 +81,9 @@ if(TARGET PDCursesMod::pdcurses)
         src/qml_parser.h
     )
     target_include_directories(qml_curses PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(qml_curses PUBLIC PDCursesMod::pdcurses)
+    target_link_libraries(qml_curses PUBLIC ${CURSES_BACKEND_TARGET})
 else()
-    message(WARNING "PDCursesMod target is unavailable; skipping qml_curses frontend build.")
+    message(WARNING "No curses backend found; skipping qml_curses frontend and CLI builds.")
 endif()
 
 qt_add_resources(sample_support "qml_resources"
@@ -110,4 +120,9 @@ if(TARGET qml_curses)
     )
     target_link_libraries(qml_curses_tests PRIVATE qml_curses Qt6::Test)
     add_test(NAME qml_curses_tests COMMAND qml_curses_tests)
+
+    add_executable(sample_cli
+        src/cli_main.cpp
+    )
+    target_link_libraries(sample_cli PRIVATE qml_curses sample_support Qt6::Core)
 endif()

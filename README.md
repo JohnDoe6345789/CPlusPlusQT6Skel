@@ -42,9 +42,21 @@ cmake -B build -G "Ninja" ^
 cmake --build build
 ```
 
-### Run the app
+### Run the GUI app
 ```sh
 build\sample_app.exe
+```
+
+### Run the terminal CLI (Win/macOS/Linux)
+`sample_cli` renders the same `qml/Main.qml` layout into the console using curses.
+
+- Windows: builds against the bundled WinCon PDCursesMod (`third_party/PDCursesMod`).
+- macOS/Linux: uses the system curses/ncurses development package (install it first if your distro omits it).
+
+```sh
+# From the build directory produced above:
+./sample_cli             # uses ../qml/Main.qml by default
+./sample_cli path/to/Main.qml  # optional explicit QML path
 ```
 
 ### Run tests
