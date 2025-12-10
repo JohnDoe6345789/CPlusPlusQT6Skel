@@ -532,6 +532,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     generator = detect_generator(args.generator)
     build_type = args.build_type or DEFAULT_BUILD_TYPE
 
+    if args.command == "verify":
+        ok = verify_environment(args.qt_prefix, generator)
+        return 0 if ok else 1
+
     if args.command == "build":
         configure_project(build_dir, generator, build_type, qt_prefix)
         build_targets(build_dir, generator, build_type, args.target, args.config)
@@ -563,14 +567,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_command([str(exe_path), *args.program_args])
         return 0
 
-    if args.command == "verify":
-        ok = verify_environment(args.qt_prefix, generator)
-        return 0 if ok else 1
-
     if args.command == "menu":
         # Choose high-level action.
-        actions = ["build", "test", "run", "verify", "quit"]
+        actions = ["verify", "build", "test", "run", "quit"]
         choice = prompt_for_choice(actions, prompt="Select action")
+        if choice == "verify":
+            ok = verify_environment(args.qt_prefix, generator)
+            return 0 if ok else 1
         if choice == "build":
             configure_project(build_dir, generator, build_type, qt_prefix)
             build_targets(build_dir, generator, build_type, [], args.config)
@@ -597,9 +600,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             run_command([str(exe_path)])
             return 0
-        if choice == "verify":
-            ok = verify_environment(args.qt_prefix, generator)
-            return 0 if ok else 1
         return 0
 
     parser.error(f"Unhandled command {args.command}")
