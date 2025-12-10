@@ -39,6 +39,7 @@ HELP_URLS = {
     "ninja": "https://ninja-build.org/",
     "qt": "https://www.qt.io/download",
     "download_script": "python download_qt6.py",
+    "qt_creator": "https://www.qt.io/product/development-tools",
 }
 PACKAGE_NAMES = {
     "ninja": {
@@ -53,6 +54,12 @@ PACKAGE_NAMES = {
         "brew": "cmake",
         "choco": "cmake",
     },
+    "qtcreator": {
+        "apt": "qtcreator",
+        "dnf": "qt-creator",
+        "brew": "qt-creator",
+        "choco": "qtcreator",
+    },
     "qt": {
         "apt": "qt6-base-dev qt6-declarative-dev",
         "dnf": "qt6-qtbase-devel qt6-qtdeclarative-devel",
@@ -60,6 +67,7 @@ PACKAGE_NAMES = {
         "choco": "qt-lts-long-term-release",  # community package; may vary
     },
 }
+QML_EXCLUDE_DIRS = {".git", ".idea", ".vscode", "__pycache__", "build", "third_party"}
 
 
 def run_command(cmd: Sequence[str], *, cwd: Optional[Path] = None) -> None:
@@ -536,6 +544,119 @@ def verify_environment(
     return ok
 
 
+def find_qml_files(root: Path) -> list[Path]:
+    """
+    Locate QML files under the project while skipping generated/vendor trees.
+    Avoids crawling heavy third_party/build directories to keep menus snappy.
+    """
+    qml_files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune unwanted directories in-place so os.walk does not descend.
+        dirnames[:] = [
+            d for d in dirnames if d not in QML_EXCLUDE_DIRS and not d.startswith(".")
+        ]
+        for filename in filenames:
+            if filename.lower().endswith(".qml"):
+                qml_files.append(Path(dirpath) / filename)
+    return sorted(qml_files, key=lambda p: p.relative_to(root))
+
+
+def locate_qt_creator() -> Optional[Path]:
+    """
+    Best-effort lookup for Qt Creator binary via PATH, env hints, and defaults.
+    """
+    exe_names = ["qtcreator.exe", "qtcreator", "Qt Creator"]
+    env_candidates = [
+        os.environ.get("QT_CREATOR_BIN"),
+        os.environ.get("QT_CREATOR_PATH"),
+    ]
+    for value in env_candidates:
+        if not value:
+            continue
+        candidate = Path(value)
+        if candidate.is_dir():
+            for name in exe_names:
+                exe = candidate / name
+                if exe.exists():
+                    return exe
+        if candidate.exists():
+            return candidate
+
+    for name in exe_names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+
+    common_paths: list[Path] = []
+    choco_root = os.environ.get("ChocolateyInstall") or os.environ.get("CHOCOLATEYINSTALL")
+    choco_tools = os.environ.get("ChocolateyToolsLocation") or os.environ.get("CHOCOLATEYTOOLsLOCATION")
+    if choco_root:
+        common_paths.extend(
+            [
+                Path(choco_root) / "bin" / "qtcreator.exe",  # shim
+                Path(choco_root) / "lib" / "qtcreator" / "tools" / "qtcreator" / "bin" / "qtcreator.exe",
+            ]
+        )
+    if choco_tools:
+        common_paths.append(Path(choco_tools) / "qtcreator" / "bin" / "qtcreator.exe")
+    if sys.platform.startswith("win"):
+        common_paths = [
+            *common_paths,
+            Path("C:/Qt/Tools/QtCreator/bin/qtcreator.exe"),
+            Path("C:/Program Files/Qt/QtCreator/bin/qtcreator.exe"),
+            Path("C:/Program Files/QtCreator/bin/qtcreator.exe"),
+        ]
+    elif sys.platform == "darwin":
+        common_paths = [
+            Path("/Applications/Qt Creator.app/Contents/MacOS/Qt Creator"),
+        ]
+    else:
+        common_paths = [
+            Path("/usr/bin/qtcreator"),
+            Path("/usr/local/bin/qtcreator"),
+        ]
+
+    for candidate in common_paths:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def qt_creator_install_help() -> str:
+    hint = package_install_hint("qtcreator")
+    return (
+        "Qt Creator not found. Set QT_CREATOR_BIN to the executable or install it "
+        f"(Qt online installer: {HELP_URLS['qt_creator']}; package manager e.g. \"{hint}\")."
+    )
+
+
+def choose_qml_file(cli_value: Optional[str]) -> Path:
+    if cli_value:
+        provided = Path(cli_value)
+        if not provided.is_absolute():
+            provided = ROOT / provided
+        if not provided.exists():
+            raise SystemExit(f"QML file not found: {provided}")
+        return provided
+
+    qml_files = find_qml_files(ROOT)
+    if not qml_files:
+        raise SystemExit("No QML files found under project (excluding build/third_party).")
+
+    labels = [str(path.relative_to(ROOT)) for path in qml_files]
+    chosen = prompt_for_choice(labels, prompt="Select QML file to open in Qt Creator")
+    return ROOT / chosen
+
+
+def open_qml_in_qt_creator(qml_path: Path) -> None:
+    creator = locate_qt_creator()
+    if not creator:
+        raise SystemExit(qt_creator_install_help())
+    if not qml_path.exists():
+        raise SystemExit(f"QML file does not exist: {qml_path}")
+    run_command([str(creator), str(qml_path)])
+
+
 def prompt_for_choice(options: Sequence[str], *, prompt: str) -> str:
     """Simple interactive selector for small option lists."""
     if not sys.stdin.isatty():
@@ -688,6 +809,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Also download Ninja and CMake via Qt maintenance tool archives.",
     )
 
+    qml_parser = subparsers.add_parser(
+        "open-qml",
+        help="Open a project QML file in Qt Creator",
+    )
+    qml_parser.add_argument(
+        "qml_file",
+        nargs="?",
+        help="Path to QML file (default: choose from discovered project QML files)",
+    )
+
     menu_parser = subparsers.add_parser(
         "menu",
         help="Interactive mode to build, test, or run targets",
@@ -729,6 +860,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qt_prefix = ensure_qt_prefix(args=args, generator=generator)
     build_type = args.build_type or DEFAULT_BUILD_TYPE
 
+    if args.command == "open-qml":
+        qml_path = choose_qml_file(getattr(args, "qml_file", None))
+        open_qml_in_qt_creator(qml_path)
+        return 0
+
     if args.command == "verify":
         ok = verify_environment(qt_prefix, generator)
         return 0 if ok else 1
@@ -769,7 +905,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "menu":
         # Choose high-level action.
-        actions = ["verify", "build", "test", "run", "quit"]
+        actions = ["verify", "build", "test", "run", "open-qml", "quit"]
         choice = prompt_for_choice(actions, prompt="Select action")
         if choice == "verify":
             ok = verify_environment(args.qt_prefix, generator)
@@ -802,6 +938,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 build_dir, target, generator, build_type, args.config
             )
             run_command([str(exe_path)])
+            return 0
+        if choice == "open-qml":
+            qml_path = choose_qml_file(None)
+            open_qml_in_qt_creator(qml_path)
             return 0
         return 0
 
