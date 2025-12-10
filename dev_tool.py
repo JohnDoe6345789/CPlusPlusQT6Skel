@@ -68,6 +68,7 @@ PACKAGE_NAMES = {
     },
 }
 QML_EXCLUDE_DIRS = {".git", ".idea", ".vscode", "__pycache__", "build", "third_party"}
+_VSWHERE_HINT_EMITTED = False
 
 
 def run_command(cmd: Sequence[str], *, cwd: Optional[Path] = None) -> None:
@@ -98,6 +99,67 @@ def detect_qt_flavor(path: Path) -> Optional[str]:
     return None
 
 
+def _vswhere_path() -> Optional[Path]:
+    """Return vswhere.exe if present in the standard Visual Studio installer dir."""
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    if not program_files_x86:
+        return None
+    path = (
+        Path(program_files_x86)
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
+    return path if path.exists() else None
+
+
+def _vswhere_install_help() -> str:
+    return (
+        "vswhere.exe not found. Install Visual Studio (or the free Build Tools 2022) "
+        "so vswhere.exe is placed under Program Files (x86)/Microsoft Visual Studio/Installer, "
+        "or add an existing vswhere.exe to PATH."
+    )
+
+
+def _maybe_warn_missing_vswhere() -> None:
+    """Emit a one-time hint about installing vswhere when we cannot find it."""
+    global _VSWHERE_HINT_EMITTED
+    if _VSWHERE_HINT_EMITTED or not sys.platform.startswith("win"):
+        return
+    _VSWHERE_HINT_EMITTED = True
+    print(_vswhere_install_help())
+
+
+def _has_visual_studio_install() -> bool:
+    """
+    Detect a Visual Studio toolchain even when cl.exe is not on PATH.
+    This prefers MSVC over incidental MinGW tools (e.g., Strawberry Perl).
+    """
+    if any(os.environ.get(var) for var in ("VCToolsInstallDir", "VCINSTALLDIR", "VSINSTALLDIR")):
+        return True
+
+    vswhere = _vswhere_path()
+    if not vswhere:
+        _maybe_warn_missing_vswhere()
+        return False
+
+    cmd = [
+        str(vswhere),
+        "-latest",
+        "-products",
+        "*",
+        "-requires",
+        "Microsoft.Component.MSBuild",
+        "-property",
+        "installationVersion",
+    ]
+    try:
+        output = subprocess.check_output(cmd, text=True, encoding="utf-8").strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return bool(output)
+
+
 def detect_compiler_flavor(generator: Optional[str]) -> Optional[str]:
     """
     Best-effort guess of Windows toolchain flavor so we can match Qt binaries.
@@ -121,6 +183,11 @@ def detect_compiler_flavor(generator: Optional[str]) -> Optional[str]:
             return "msvc"
         if "mingw" in name or name.startswith("g++") or name.startswith("gcc"):
             return "mingw"
+
+    # Prefer a detected Visual Studio install even when cl.exe is not on PATH
+    # (common when a MinGW toolchain comes earlier in PATH, e.g., Strawberry Perl).
+    if _has_visual_studio_install():
+        return "msvc"
 
     cl_path = shutil.which("cl")
     if cl_path:
