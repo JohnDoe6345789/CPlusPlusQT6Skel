@@ -628,12 +628,73 @@ def is_multi_config(generator: Optional[str], build_dir: Path) -> bool:
     return False
 
 
+def _clear_build_dir(build_dir: Path) -> None:
+    """Remove an existing build directory to allow reconfiguration."""
+    if not build_dir.exists():
+        return
+    print(f"Clearing existing build directory: {build_dir}")
+    shutil.rmtree(build_dir)
+
+
+def _resolve_generator_for_build_dir(
+    build_dir: Path,
+    requested_generator: Optional[str],
+    *,
+    generator_is_strict: bool,
+) -> Optional[str]:
+    """
+    Reconcile a requested generator with any existing CMake cache.
+
+    If the build directory already has a cache configured with a different
+    generator, either reuse the cached one (for auto-detected generators) or
+    prompt/abort when the user explicitly requested a new generator.
+    """
+    cached = read_generator_from_cache(build_dir)
+    if cached and not requested_generator:
+        print(
+            f"Reusing cached CMake generator '{cached}' from build directory {build_dir}"
+        )
+        return cached
+
+    if cached and requested_generator and cached != requested_generator:
+        message = (
+            f"Build directory {build_dir} was configured with generator '{cached}', "
+            f"but '{requested_generator}' was requested."
+        )
+        if not generator_is_strict:
+            print(f"{message} Reusing cached generator.")
+            return cached
+
+        if prompt_yes_no(
+            "Clear the existing build directory to switch generators?", default=False
+        ):
+            _clear_build_dir(build_dir)
+            return requested_generator
+
+        raise SystemExit(
+            message
+            + " Delete or choose a different --build-dir to switch generators, "
+            "or rerun without --generator to reuse the cached generator."
+        )
+
+    return requested_generator
+
+
 def configure_project(
     build_dir: Path,
     generator: Optional[str],
     build_type: str,
     qt_prefix: Optional[Path],
-) -> None:
+    *,
+    generator_is_strict: bool = False,
+) -> Optional[str]:
+    if build_dir.exists() and not build_dir.is_dir():
+        raise SystemExit(f"Build path exists and is not a directory: {build_dir}")
+
+    generator = _resolve_generator_for_build_dir(
+        build_dir, generator, generator_is_strict=generator_is_strict
+    )
+
     build_dir.mkdir(parents=True, exist_ok=True)
 
     cmd: List[str] = ["cmake", "-S", str(ROOT), "-B", str(build_dir)]
@@ -645,6 +706,7 @@ def configure_project(
         cmd.append(f"-DCMAKE_BUILD_TYPE={build_type}")
 
     run_command(cmd)
+    return generator
 
 
 def build_targets(
@@ -1214,6 +1276,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     build_dir = args.build_dir.resolve()
     generator = detect_generator(args.generator)
+    generator_is_strict = bool(args.generator or os.environ.get("CMAKE_GENERATOR"))
     qt_prefix = ensure_qt_prefix(args=args, generator=generator)
     build_type = args.build_type or DEFAULT_BUILD_TYPE
 
@@ -1228,20 +1291,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "build":
         enforce_qt_toolchain_match(qt_prefix, generator)
-        configure_project(build_dir, generator, build_type, qt_prefix)
+        generator = configure_project(
+            build_dir,
+            generator,
+            build_type,
+            qt_prefix,
+            generator_is_strict=generator_is_strict,
+        )
         build_targets(build_dir, generator, build_type, args.target, args.config)
         return 0
 
     if args.command == "test":
         enforce_qt_toolchain_match(qt_prefix, generator)
-        configure_project(build_dir, generator, build_type, qt_prefix)
+        generator = configure_project(
+            build_dir,
+            generator,
+            build_type,
+            qt_prefix,
+            generator_is_strict=generator_is_strict,
+        )
         build_targets(build_dir, generator, build_type, [], args.config)
         run_tests(build_dir, generator, build_type, args.config, args.ctest_args)
         return 0
 
     if args.command == "run":
         enforce_qt_toolchain_match(qt_prefix, generator)
-        configure_project(build_dir, generator, build_type, qt_prefix)
+        generator = configure_project(
+            build_dir,
+            generator,
+            build_type,
+            qt_prefix,
+            generator_is_strict=generator_is_strict,
+        )
         available_targets = list_runnable_targets(
             build_dir, generator, build_type, args.config
         )
@@ -1269,19 +1350,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0 if ok else 1
         if choice == "build":
             enforce_qt_toolchain_match(qt_prefix, generator)
-            configure_project(build_dir, generator, build_type, qt_prefix)
+            generator = configure_project(
+                build_dir,
+                generator,
+                build_type,
+                qt_prefix,
+                generator_is_strict=generator_is_strict,
+            )
             build_targets(build_dir, generator, build_type, [], args.config)
             return 0
         if choice == "test":
             enforce_qt_toolchain_match(qt_prefix, generator)
-            configure_project(build_dir, generator, build_type, qt_prefix)
+            generator = configure_project(
+                build_dir,
+                generator,
+                build_type,
+                qt_prefix,
+                generator_is_strict=generator_is_strict,
+            )
             build_targets(build_dir, generator, build_type, [], args.config)
             run_tests(build_dir, generator, build_type, args.config, [])
             return 0
         if choice == "run":
             do_build = prompt_yes_no("Build before running?", default=True)
             enforce_qt_toolchain_match(qt_prefix, generator)
-            configure_project(build_dir, generator, build_type, qt_prefix)
+            generator = configure_project(
+                build_dir,
+                generator,
+                build_type,
+                qt_prefix,
+                generator_is_strict=generator_is_strict,
+            )
             available_targets = list_runnable_targets(
                 build_dir, generator, build_type, args.config
             )
